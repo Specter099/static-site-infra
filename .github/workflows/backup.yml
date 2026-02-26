@@ -7,7 +7,51 @@ on:
 
 jobs:
   backup:
-    uses: Specter099/.github/.github/workflows/repo-backup.yml@main
-    secrets: inherit
-    with:
-      s3-bucket: github-repo-backup-1b114b0d7fd4
+    name: Backup to S3
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve inputs
+        id: vars
+        run: |
+          REPO_NAME="${{ github.event.repository.name }}"
+          DATE=$(date -u +%Y-%m-%d)
+          SHA="${{ github.sha }}"
+          FILENAME="${REPO_NAME}-${DATE}-${SHA:0:7}.zip"
+          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          echo "s3-key=${REPO_NAME}/${FILENAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Create zip archive
+        run: |
+          git archive --format=zip --output="${{ steps.vars.outputs.filename }}" HEAD
+          SIZE=$(du -sh "${{ steps.vars.outputs.filename }}" | cut -f1)
+          echo "ARCHIVE_SIZE=$SIZE" >> "$GITHUB_ENV"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Upload to S3
+        run: |
+          aws s3 cp "${{ steps.vars.outputs.filename }}" \
+            "s3://github-repo-backup-1b114b0d7fd4/${{ steps.vars.outputs.s3-key }}"
+
+      - name: Write job summary
+        run: |
+          echo "## Repo Backup" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Repository | \`${{ github.repository }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Archive | \`${{ steps.vars.outputs.filename }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Size | $ARCHIVE_SIZE |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| S3 URI | \`s3://github-repo-backup-1b114b0d7fd4/${{ steps.vars.outputs.s3-key }}\` |" >> "$GITHUB_STEP_SUMMARY"
