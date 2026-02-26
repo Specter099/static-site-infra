@@ -1,0 +1,13 @@
+name: Backup to S3
+
+on:
+  schedule:
+    - cron: "0 2 * * 0"  # weekly, Sunday 02:00 UTC
+  workflow_dispatch:
+
+jobs:
+  backup:
+    uses: Specter099/.github/.github/workflows/repo-backup.yml@main
+    secrets: inherit
+    with:
+      s3-bucket: github-repo-backup-1b114b0d7fd4
