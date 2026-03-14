@@ -29,6 +29,9 @@ class StaticSiteStack(Stack):
         certificate_arn: str | None = None,
         web_acl_id: str | None = None,
         dashboard_name: str | None = None,
+        enable_spa_routing: bool = True,
+        spa_error_ttl: Duration | None = None,
+        tags: dict[str, str] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -37,6 +40,10 @@ class StaticSiteStack(Stack):
             description=f"Static site hosting for {domain_name}",
             **kwargs,
         )
+
+        if tags:
+            for key, value in tags.items():
+                cdk.Tags.of(self).add(key, value)
 
         # CloudWatch dashboard names allow only alphanumerics, dashes, and underscores.
         # Replace dots so domain names work as the default (e.g. "example.com" → "example-com").
@@ -123,6 +130,26 @@ class StaticSiteStack(Stack):
                 "so a certificate can be created."
             )
 
+        # SPA routing: rewrite 403/404 to index.html so client-side routing works.
+        # Disabled by default for multi-page sites (docs, blogs) where real 404s matter.
+        error_responses = []
+        if enable_spa_routing:
+            ttl = spa_error_ttl or Duration.minutes(5)
+            error_responses = [
+                cloudfront.ErrorResponse(
+                    http_status=403,
+                    response_http_status=200,
+                    response_page_path="/index.html",
+                    ttl=ttl,
+                ),
+                cloudfront.ErrorResponse(
+                    http_status=404,
+                    response_http_status=200,
+                    response_page_path="/index.html",
+                    ttl=ttl,
+                ),
+            ]
+
         # CloudFront distribution
         distribution = cloudfront.Distribution(
             self,
@@ -135,20 +162,7 @@ class StaticSiteStack(Stack):
             domain_names=[domain_name, f"www.{domain_name}"],
             certificate=certificate,
             default_root_object="index.html",
-            error_responses=[
-                cloudfront.ErrorResponse(
-                    http_status=403,
-                    response_http_status=200,
-                    response_page_path="/index.html",
-                    ttl=Duration.minutes(5),
-                ),
-                cloudfront.ErrorResponse(
-                    http_status=404,
-                    response_http_status=200,
-                    response_page_path="/index.html",
-                    ttl=Duration.minutes(5),
-                ),
-            ],
+            error_responses=error_responses if error_responses else None,
             web_acl_id=web_acl_id,
         )
 
