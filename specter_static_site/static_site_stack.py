@@ -11,7 +11,6 @@ from aws_cdk import (
     aws_certificatemanager as acm,
     aws_cloudwatch as cloudwatch,
     aws_route53 as route53,
-    aws_route53_targets as route53_targets,
 )
 from constructs import Construct
 from cdk_nag import NagSuppressions
@@ -232,40 +231,6 @@ class StaticSiteStack(Stack):
                 ],
             ],
         )
-
-        # Route 53 alias records for apex and www
-        if hosted_zone:
-            cf_target = route53_targets.CloudFrontTarget(distribution)
-
-            route53.ARecord(
-                self,
-                "ApexAlias",
-                zone=hosted_zone,
-                target=route53.RecordTarget.from_alias(cf_target),
-            )
-
-            route53.AaaaRecord(
-                self,
-                "ApexAliasIPv6",
-                zone=hosted_zone,
-                target=route53.RecordTarget.from_alias(cf_target),
-            )
-
-            route53.ARecord(
-                self,
-                "WwwAlias",
-                zone=hosted_zone,
-                record_name="www",
-                target=route53.RecordTarget.from_alias(cf_target),
-            )
-
-            route53.AaaaRecord(
-                self,
-                "WwwAliasIPv6",
-                zone=hosted_zone,
-                record_name="www",
-                target=route53.RecordTarget.from_alias(cf_target),
-            )
 
         # Deploy site assets from dist/
         s3deploy.BucketDeployment(
