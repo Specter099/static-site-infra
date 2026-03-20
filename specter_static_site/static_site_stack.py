@@ -1,4 +1,3 @@
-import aws_cdk as cdk
 from aws_cdk import (
     Stack,
     Duration,
@@ -199,7 +198,9 @@ class StaticSiteStack(Stack):
                             cloudwatch.Metric(
                                 namespace="AWS/CloudFront",
                                 metric_name="5xxErrorRate",
-                                dimensions_map={"DistributionId": distribution.distribution_id},
+                                dimensions_map={
+                                    "DistributionId": distribution.distribution_id
+                                },
                                 statistic="Average",
                                 period=Duration.minutes(5),
                                 label="5xx Error Rate",
@@ -207,7 +208,9 @@ class StaticSiteStack(Stack):
                             cloudwatch.Metric(
                                 namespace="AWS/CloudFront",
                                 metric_name="4xxErrorRate",
-                                dimensions_map={"DistributionId": distribution.distribution_id},
+                                dimensions_map={
+                                    "DistributionId": distribution.distribution_id
+                                },
                                 statistic="Average",
                                 period=Duration.minutes(5),
                                 label="4xx Error Rate",
@@ -221,7 +224,9 @@ class StaticSiteStack(Stack):
                             cloudwatch.Metric(
                                 namespace="AWS/CloudFront",
                                 metric_name="Requests",
-                                dimensions_map={"DistributionId": distribution.distribution_id},
+                                dimensions_map={
+                                    "DistributionId": distribution.distribution_id
+                                },
                                 statistic="Sum",
                                 period=Duration.minutes(5),
                                 label="Total Requests",
@@ -245,20 +250,39 @@ class StaticSiteStack(Stack):
         # cdk-nag suppressions for accepted deviations
         NagSuppressions.add_resource_suppressions(
             cloudfront_logs_bucket,
-            [{"id": "AwsSolutions-S1", "reason": "CloudFrontLogsBucket is a logging destination; enabling access logs on it would be circular. CloudFront standard logging is disabled due to Free pricing plan incompatibility (HTTP 400)."}],
+            [
+                {
+                    "id": "AwsSolutions-S1",
+                    "reason": "CloudFrontLogsBucket is a logging destination; enabling access logs on it would be circular. CloudFront standard logging is disabled due to Free pricing plan incompatibility (HTTP 400).",
+                }
+            ],
         )
         NagSuppressions.add_resource_suppressions(
             distribution,
-            [{"id": "AwsSolutions-CFR3", "reason": "CloudFront standard logging is incompatible with the Free pricing plan (returns HTTP 400). S3 access logging is active at the bucket layer via S3AccessLogsBucket."}],
+            [
+                {
+                    "id": "AwsSolutions-CFR3",
+                    "reason": "CloudFront standard logging is incompatible with the Free pricing plan (returns HTTP 400). S3 access logging is active at the bucket layer via S3AccessLogsBucket.",
+                }
+            ],
         )
         # BucketDeployment creates a singleton Custom Resource Lambda at the stack level
         # (not under the deploy construct), so these must be suppressed at the stack level.
         NagSuppressions.add_stack_suppressions(
             self,
             [
-                {"id": "AwsSolutions-IAM4", "reason": "CDK BucketDeployment L2 construct attaches AWSLambdaBasicExecutionRole to its internal singleton Lambda service role; not configurable without replacing the construct."},
-                {"id": "AwsSolutions-IAM5", "reason": "CDK BucketDeployment L2 construct requires wildcard S3 permissions on its internal Lambda role to deploy assets; not configurable without replacing the construct."},
-                {"id": "AwsSolutions-L1", "reason": "CDK BucketDeployment L2 construct manages its own internal Lambda runtime version; not configurable without replacing the construct."},
+                {
+                    "id": "AwsSolutions-IAM4",
+                    "reason": "CDK BucketDeployment L2 construct attaches AWSLambdaBasicExecutionRole to its internal singleton Lambda service role; not configurable without replacing the construct.",
+                },
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": "CDK BucketDeployment L2 construct requires wildcard S3 permissions on its internal Lambda role to deploy assets; not configurable without replacing the construct.",
+                },
+                {
+                    "id": "AwsSolutions-L1",
+                    "reason": "CDK BucketDeployment L2 construct manages its own internal Lambda runtime version; not configurable without replacing the construct.",
+                },
             ],
         )
 
