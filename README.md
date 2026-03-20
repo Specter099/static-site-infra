@@ -8,7 +8,6 @@ Reusable AWS CDK construct for hosting static websites on S3 + CloudFront.
 - S3 buckets for S3 and CloudFront access logs (180-day retention)
 - CloudFront distribution (HTTPS-only, SPA routing, security headers)
 - ACM certificate (imported or DNS-validated via Route53)
-- Route53 A + AAAA records for apex and `www` (optional)
 - CloudWatch alarms: 5xx >5%, 4xx >10%
 - CloudWatch dashboard
 - Optional WAFv2 Web ACL attachment
@@ -64,7 +63,7 @@ app.synth()
 |-----------|------|----------|-------------|
 | `domain_name` | `str` | Yes | Apex domain (e.g. `example.com`) |
 | `dist_path` | `str` | Yes | Absolute path to built frontend `dist/` directory |
-| `hosted_zone_id` | `str` | No* | Route53 hosted zone ID for DNS records + cert validation |
+| `hosted_zone_id` | `str` | No* | Route53 hosted zone ID for cert DNS validation |
 | `certificate_arn` | `str` | No* | ARN of existing ACM certificate to import |
 | `web_acl_id` | `str` | No | WAFv2 Web ACL ARN to attach to CloudFront |
 | `dashboard_name` | `str` | No | CloudWatch dashboard name (defaults to `domain_name`) |
