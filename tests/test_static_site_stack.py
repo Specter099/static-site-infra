@@ -1,5 +1,3 @@
-import os
-import tempfile
 import aws_cdk as cdk
 import pytest
 from specter_static_site import StaticSiteStack
@@ -14,7 +12,7 @@ def make_dist(tmp_path):
 def test_synth_with_certificate_arn(tmp_path):
     dist = make_dist(tmp_path)
     app = cdk.App()
-    stack = StaticSiteStack(
+    StaticSiteStack(
         app,
         "TestStack",
         domain_name="example.com",
@@ -28,7 +26,7 @@ def test_synth_with_certificate_arn(tmp_path):
 def test_synth_with_hosted_zone(tmp_path):
     dist = make_dist(tmp_path)
     app = cdk.App()
-    stack = StaticSiteStack(
+    StaticSiteStack(
         app,
         "TestStack",
         domain_name="example.com",
@@ -43,7 +41,7 @@ def test_synth_with_hosted_zone(tmp_path):
 def test_synth_with_web_acl(tmp_path):
     dist = make_dist(tmp_path)
     app = cdk.App()
-    stack = StaticSiteStack(
+    StaticSiteStack(
         app,
         "TestStack",
         domain_name="example.com",
@@ -58,7 +56,7 @@ def test_synth_with_web_acl(tmp_path):
 def test_synth_with_dashboard_name(tmp_path):
     dist = make_dist(tmp_path)
     app = cdk.App()
-    stack = StaticSiteStack(
+    StaticSiteStack(
         app,
         "TestStack",
         domain_name="example.com",
