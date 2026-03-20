@@ -62,6 +62,9 @@ class StaticSiteStack(Stack):
                 ),
             ],
         )
+        s3_access_logs_bucket.node.default_child.add_property_override(
+            "BucketNamespace", "account-regional"
+        )
 
         # CloudFront access logs bucket
         cloudfront_logs_bucket = s3.Bucket(
@@ -79,6 +82,9 @@ class StaticSiteStack(Stack):
                     expiration=Duration.days(180),
                 ),
             ],
+        )
+        cloudfront_logs_bucket.node.default_child.add_property_override(
+            "BucketNamespace", "account-regional"
         )
 
         # S3 bucket for site assets
@@ -99,6 +105,9 @@ class StaticSiteStack(Stack):
                     noncurrent_version_expiration=Duration.days(30),
                 )
             ],
+        )
+        site_bucket.node.default_child.add_property_override(
+            "BucketNamespace", "account-regional"
         )
 
         # Look up Route 53 hosted zone if provided
