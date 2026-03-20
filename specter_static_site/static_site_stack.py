@@ -264,6 +264,7 @@ class StaticSiteStack(Stack):
             distribution=distribution,
             distribution_paths=["/*"],
             memory_limit=deployment_memory_limit,
+            exclude=exclude_patterns or [],
         )
 
         # cdk-nag suppressions for accepted deviations
