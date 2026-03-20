@@ -1,0 +1,11 @@
+name: Validate Bucket Names
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    uses: Specter099/.github/.github/workflows/validate-bucket-names.yml@main
+    with:
+      scan-path: specter_static_site/
