@@ -43,10 +43,14 @@ class StaticSiteStack(Stack):
         # Replace dots so domain names work as the default (e.g. "example.com" → "example-com").
         resolved_dashboard_name = (dashboard_name or domain_name).replace(".", "-")
 
+        # Sanitize domain name for use in bucket names (replace dots with hyphens).
+        domain_slug = domain_name.replace(".", "-")
+
         # S3 access logs bucket
         s3_access_logs_bucket = s3.Bucket(
             self,
             "S3AccessLogsBucket",
+            bucket_name=f"{domain_slug}-s3-logs-{self.account}-{self.region}-an",
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             encryption=s3.BucketEncryption.S3_MANAGED,
             enforce_ssl=True,
@@ -63,6 +67,7 @@ class StaticSiteStack(Stack):
         cloudfront_logs_bucket = s3.Bucket(
             self,
             "CloudFrontLogsBucket",
+            bucket_name=f"{domain_slug}-cf-logs-{self.account}-{self.region}-an",
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             encryption=s3.BucketEncryption.KMS_MANAGED,
             enforce_ssl=True,
@@ -80,6 +85,7 @@ class StaticSiteStack(Stack):
         site_bucket = s3.Bucket(
             self,
             "SiteBucket",
+            bucket_name=f"{domain_slug}-site-{self.account}-{self.region}-an",
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             encryption=s3.BucketEncryption.S3_MANAGED,
             enforce_ssl=True,
