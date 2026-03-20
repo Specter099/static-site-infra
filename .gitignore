@@ -208,3 +208,6 @@ __marimo__/
 
 # Git worktrees
 .worktrees/
+
+# CDK output
+cdk.out/
