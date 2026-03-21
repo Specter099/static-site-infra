@@ -40,7 +40,7 @@ jobs:
         run: npm install -g aws-cdk
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: pip install -r requirements.txt
 
       - name: CDK Synth
         run: cdk synth
