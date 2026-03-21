@@ -1,0 +1,54 @@
+name: Security — Access Analyzer
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  access-analyzer:
+    name: IAM Access Analyzer
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install CDK CLI
+        run: npm install -g aws-cdk
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: CDK Synth
+        run: cdk synth
+        env:
+          JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION: "1"
+
+      - name: Check no public access
+        uses: Specter099/.github/.github/actions/access-analyzer@main
+        with:
+          template-dir: cdk.out
+          aws-region: us-east-1
