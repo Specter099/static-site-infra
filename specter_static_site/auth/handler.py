@@ -1,6 +1,8 @@
 """Lambda@Edge viewer-request handler for Cognito authentication."""
 
+import hashlib
 import json
+import os
 import urllib.parse
 from pathlib import Path
 
@@ -43,16 +45,51 @@ def _redirect(url: str, extra_headers: dict | None = None) -> dict:
     return {"status": "302", "statusDescription": "Found", "headers": headers}
 
 
-def _authorize_url() -> str:
+def _generate_state() -> str:
+    """Generate a cryptographically random state parameter for CSRF protection."""
+    return hashlib.sha256(os.urandom(32)).hexdigest()
+
+
+def _authorize_url(state: str) -> str:
     params = urllib.parse.urlencode(
         {
             "response_type": "code",
             "client_id": CLIENT_ID,
             "redirect_uri": REDIRECT_URI,
             "scope": "openid",
+            "state": state,
         }
     )
     return f"https://{COGNITO_DOMAIN}/oauth2/authorize?{params}"
+
+
+def _redirect_to_login() -> dict:
+    """Redirect to Cognito login with CSRF state cookie."""
+    state = _generate_state()
+    state_cookie = {
+        "set-cookie": [
+            {
+                "key": "Set-Cookie",
+                "value": _set_cookie("auth_state", state, 300),
+            }
+        ]
+    }
+    return _redirect(_authorize_url(state), extra_headers=state_cookie)
+
+
+def _safe_redirect_path(uri: str, qs: str) -> str:
+    """Validate and return a safe relative redirect path."""
+    # Only allow relative paths starting with /
+    if not uri or not uri.startswith("/") or uri.startswith("//"):
+        return "/"
+    # Strip any scheme or authority that might be smuggled in
+    parsed = urllib.parse.urlparse(uri)
+    if parsed.scheme or parsed.netloc:
+        return "/"
+    safe_path = parsed.path
+    if qs:
+        return f"{safe_path}?{qs}"
+    return safe_path
 
 
 def handler(event, context):  # noqa: ARG001
@@ -64,7 +101,7 @@ def handler(event, context):  # noqa: ARG001
 
     # Handle callback from Cognito.
     if uri == CALLBACK_PATH:
-        return _handle_callback(querystring)
+        return _handle_callback(querystring, cookies)
 
     # Handle sign-out.
     if uri == SIGNOUT_PATH:
@@ -82,17 +119,24 @@ def handler(event, context):  # noqa: ARG001
             # Token invalid or expired — try refresh.
             refresh_token = cookies.get("refresh_token")
             if refresh_token:
-                return _try_refresh(refresh_token, request)
+                return _try_refresh(refresh_token, uri, querystring)
 
     # No valid token — redirect to login.
-    return _redirect(_authorize_url())
+    return _redirect_to_login()
 
 
-def _handle_callback(querystring: str) -> dict:
+def _handle_callback(querystring: str, cookies: dict) -> dict:
     params = urllib.parse.parse_qs(querystring)
     code = params.get("code", [None])[0]
+    state = params.get("state", [None])[0]
+
     if not code:
         return _redirect("/")
+
+    # Validate state parameter against cookie to prevent CSRF.
+    expected_state = cookies.get("auth_state")
+    if not state or not expected_state or state != expected_state:
+        return _redirect_to_login()
 
     from cognito_client import exchange_code
 
@@ -101,12 +145,16 @@ def _handle_callback(querystring: str) -> dict:
             code, REDIRECT_URI, COGNITO_DOMAIN, CLIENT_ID, CLIENT_SECRET
         )
     except Exception:
-        return _redirect(_authorize_url())
+        return _redirect_to_login()
 
     cookie_headers = [
         {
             "key": "Set-Cookie",
             "value": _set_cookie("id_token", tokens["id_token"], 3600),
+        },
+        {
+            "key": "Set-Cookie",
+            "value": _clear_cookie("auth_state"),
         },
     ]
     if "refresh_token" in tokens:
@@ -124,22 +172,21 @@ def _handle_signout() -> dict:
     cookie_headers = [
         {"key": "Set-Cookie", "value": _clear_cookie("id_token")},
         {"key": "Set-Cookie", "value": _clear_cookie("refresh_token")},
+        {"key": "Set-Cookie", "value": _clear_cookie("auth_state")},
     ]
     logout_url = f"https://{COGNITO_DOMAIN}/logout?client_id={CLIENT_ID}&logout_uri={urllib.parse.quote(REDIRECT_URI.replace('/_callback', '/'))}"
     return _redirect(logout_url, extra_headers={"set-cookie": cookie_headers})
 
 
-def _try_refresh(refresh_token: str, request: dict) -> dict:
+def _try_refresh(refresh_token: str, uri: str, querystring: str) -> dict:
     from cognito_client import refresh_tokens
 
     tokens = refresh_tokens(refresh_token, COGNITO_DOMAIN, CLIENT_ID, CLIENT_SECRET)
     if not tokens or "id_token" not in tokens:
-        return _redirect(_authorize_url())
+        return _redirect_to_login()
 
-    # Refresh succeeded — set new cookie and redirect to same page to retry.
-    uri = request.get("uri", "/")
-    qs = request.get("querystring", "")
-    target = f"{uri}?{qs}" if qs else uri
+    # Refresh succeeded — set new cookie and redirect to validated path.
+    target = _safe_redirect_path(uri, querystring)
 
     cookie_headers = [
         {
