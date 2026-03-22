@@ -83,6 +83,38 @@ def test_synth_with_deploy_role_arns(tmp_path):
     assert assembly is not None
 
 
+def test_synth_with_cognito_auth(tmp_path):
+    dist = make_dist(tmp_path)
+    app = cdk.App()
+    StaticSiteStack(
+        app,
+        "TestStack",
+        domain_name="example.com",
+        dist_path=dist,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+        cognito_user_pool_id="us-east-1_TestPool",
+        cognito_client_id="testclientid",
+        cognito_client_secret="testclientsecret",
+        cognito_domain="myapp.auth.us-east-1.amazoncognito.com",
+    )
+    assembly = app.synth()
+    assert assembly is not None
+
+
+def test_partial_cognito_params_raises(tmp_path):
+    dist = make_dist(tmp_path)
+    app = cdk.App()
+    with pytest.raises(ValueError, match="All Cognito parameters"):
+        StaticSiteStack(
+            app,
+            "TestStack",
+            domain_name="example.com",
+            dist_path=dist,
+            certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+            cognito_user_pool_id="us-east-1_TestPool",
+        )
+
+
 def test_raises_without_cert_or_zone(tmp_path):
     dist = make_dist(tmp_path)
     app = cdk.App()
