@@ -2,9 +2,13 @@
 
 import hashlib
 import json
+import logging
 import os
 import urllib.parse
 from pathlib import Path
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 # Config is baked into config.json at CDK bundling time.
 _config = json.loads((Path(__file__).parent / "config.json").read_text())
@@ -99,6 +103,8 @@ def handler(event, context):  # noqa: ARG001
     querystring = request.get("querystring", "")
     cookies = _parse_cookies(headers)
 
+    logger.info("uri=%s cookies=%s", uri, list(cookies.keys()))
+
     # Handle callback from Cognito.
     if uri == CALLBACK_PATH:
         return _handle_callback(querystring, cookies)
@@ -115,7 +121,8 @@ def handler(event, context):  # noqa: ARG001
 
             validate_token(id_token, USER_POOL_ID, CLIENT_ID, REGION)
             return request  # Valid token — pass through.
-        except Exception:
+        except Exception as e:
+            logger.warning("Token validation failed: %s", e)
             # Token invalid or expired — try refresh.
             refresh_token = cookies.get("refresh_token")
             if refresh_token:
@@ -135,7 +142,9 @@ def _handle_callback(querystring: str, cookies: dict) -> dict:
 
     # Validate state parameter against cookie to prevent CSRF.
     expected_state = cookies.get("auth_state")
+    logger.info("callback: state=%s expected=%s", state, expected_state)
     if not state or not expected_state or state != expected_state:
+        logger.warning("State mismatch")
         return _redirect_to_login()
 
     from cognito_client import exchange_code
@@ -144,7 +153,8 @@ def _handle_callback(querystring: str, cookies: dict) -> dict:
         tokens = exchange_code(
             code, REDIRECT_URI, COGNITO_DOMAIN, CLIENT_ID, CLIENT_SECRET
         )
-    except Exception:
+    except Exception as e:
+        logger.error("Token exchange failed: %s", e)
         return _redirect_to_login()
 
     cookie_headers = [
