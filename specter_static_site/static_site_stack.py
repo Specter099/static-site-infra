@@ -1,20 +1,26 @@
+import json
+from pathlib import Path
+
 from aws_cdk import (
-    Stack,
-    Duration,
+    BundlingOptions,
     CfnOutput,
+    Duration,
     RemovalPolicy,
-    aws_s3 as s3,
+    Stack,
+    aws_certificatemanager as acm,
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
-    aws_s3_deployment as s3deploy,
-    aws_certificatemanager as acm,
     aws_cloudwatch as cloudwatch,
     aws_iam as iam,
+    aws_lambda as _lambda,
     aws_route53 as route53,
+    aws_s3 as s3,
+    aws_s3_deployment as s3deploy,
 )
-from typing import List, Optional
-from constructs import Construct
 from cdk_nag import NagSuppressions
+from constructs import Construct
+
+_AUTH_DIR = str(Path(__file__).parent / "auth")
 
 
 class StaticSiteStack(Stack):
@@ -29,8 +35,12 @@ class StaticSiteStack(Stack):
         certificate_arn: str | None = None,
         web_acl_id: str | None = None,
         dashboard_name: str | None = None,
-        deploy_role_arns: Optional[List[str]] = None,
-        exclude_patterns: Optional[List[str]] = None,
+        deploy_role_arns: list[str] | None = None,
+        cognito_user_pool_id: str | None = None,
+        cognito_client_id: str | None = None,
+        cognito_client_secret: str | None = None,
+        cognito_domain: str | None = None,
+        exclude_patterns: list[str] | None = None,
         deployment_memory_limit: int = 512,
         **kwargs,
     ) -> None:
@@ -41,8 +51,21 @@ class StaticSiteStack(Stack):
             **kwargs,
         )
 
+        # Validate Cognito parameters: all or none.
+        cognito_params = [
+            cognito_user_pool_id,
+            cognito_client_id,
+            cognito_client_secret,
+            cognito_domain,
+        ]
+        enable_auth = all(p is not None for p in cognito_params)
+        if any(p is not None for p in cognito_params) and not enable_auth:
+            raise ValueError(
+                "All Cognito parameters (cognito_user_pool_id, cognito_client_id, "
+                "cognito_client_secret, cognito_domain) must be provided together."
+            )
+
         # CloudWatch dashboard names allow only alphanumerics, dashes, and underscores.
-        # Replace dots so domain names work as the default (e.g. "example.com" → "example-com").
         resolved_dashboard_name = (dashboard_name or domain_name).replace(".", "-")
 
         # Sanitize domain name for use in bucket names (replace dots with hyphens).
@@ -150,6 +173,52 @@ class StaticSiteStack(Stack):
                 "so a certificate can be created."
             )
 
+        # Lambda@Edge for Cognito authentication (optional).
+        edge_lambdas = []
+        if enable_auth:
+            region = cognito_user_pool_id.split("_")[0]  # type: ignore[union-attr]
+            auth_config = json.dumps(
+                {
+                    "user_pool_id": cognito_user_pool_id,
+                    "client_id": cognito_client_id,
+                    "client_secret": cognito_client_secret,
+                    "cognito_domain": cognito_domain,
+                    "redirect_uri": f"https://{domain_name}/_callback",
+                    "callback_path": "/_callback",
+                    "signout_path": "/_signout",
+                    "region": region,
+                }
+            )
+
+            auth_function = _lambda.Function(
+                self,
+                "AuthEdgeFunction",
+                runtime=_lambda.Runtime.PYTHON_3_12,
+                handler="handler.handler",
+                code=_lambda.Code.from_asset(
+                    _AUTH_DIR,
+                    bundling=BundlingOptions(
+                        image=_lambda.Runtime.PYTHON_3_12.bundling_image,
+                        command=[
+                            "bash",
+                            "-c",
+                            "pip install -r requirements.txt -t /asset-output"
+                            " && cp *.py /asset-output/"
+                            f" && echo '{auth_config}' > /asset-output/config.json",
+                        ],
+                    ),
+                ),
+                timeout=Duration.seconds(5),
+                memory_size=128,
+            )
+
+            edge_lambdas.append(
+                cloudfront.EdgeLambda(
+                    function_version=auth_function.current_version,
+                    event_type=cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
+                )
+            )
+
         # CloudFront distribution
         distribution = cloudfront.Distribution(
             self,
@@ -158,6 +227,7 @@ class StaticSiteStack(Stack):
                 origin=origins.S3BucketOrigin.with_origin_access_control(site_bucket),
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 response_headers_policy=cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+                edge_lambdas=edge_lambdas or None,
             ),
             domain_names=[domain_name, f"www.{domain_name}"],
             certificate=certificate,
