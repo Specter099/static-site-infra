@@ -202,7 +202,7 @@ class StaticSiteStack(Stack):
                         command=[
                             "bash",
                             "-c",
-                            "pip install -r requirements.txt -t /asset-output"
+                            "pip install PyJWT cryptography urllib3 -t /asset-output"
                             " && cp *.py /asset-output/"
                             f" && echo '{auth_config}' > /asset-output/config.json",
                         ],
