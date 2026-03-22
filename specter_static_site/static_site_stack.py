@@ -9,6 +9,7 @@ from aws_cdk import (
     aws_s3_deployment as s3deploy,
     aws_certificatemanager as acm,
     aws_cloudwatch as cloudwatch,
+    aws_iam as iam,
     aws_route53 as route53,
 )
 from typing import List, Optional
@@ -17,7 +18,7 @@ from cdk_nag import NagSuppressions
 
 
 class StaticSiteStack(Stack):
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         scope: Construct,
         construct_id: str,
@@ -28,6 +29,7 @@ class StaticSiteStack(Stack):
         certificate_arn: str | None = None,
         web_acl_id: str | None = None,
         dashboard_name: str | None = None,
+        deploy_role_arns: Optional[List[str]] = None,
         exclude_patterns: Optional[List[str]] = None,
         deployment_memory_limit: int = 512,
         **kwargs,
@@ -109,6 +111,15 @@ class StaticSiteStack(Stack):
         site_bucket.node.default_child.add_property_override(
             "BucketNamespace", "account-regional"
         )
+
+        # Grant external roles read/write access to the site bucket (e.g. CI/CD pipelines).
+        for role_arn in deploy_role_arns or []:
+            role = iam.Role.from_role_arn(
+                self,
+                f"DeployRole{role_arn.split('/')[-1]}",
+                role_arn,
+            )
+            site_bucket.grant_read_write(role)
 
         # Look up Route 53 hosted zone if provided
         hosted_zone = None
