@@ -40,6 +40,7 @@ class StaticSiteStack(Stack):
         cognito_client_id: str | None = None,
         cognito_client_secret: str | None = None,
         cognito_domain: str | None = None,
+        skip_deployment: bool = False,
         exclude_patterns: list[str] | None = None,
         deployment_memory_limit: int = 512,
         **kwargs,
@@ -342,17 +343,20 @@ class StaticSiteStack(Stack):
             ],
         )
 
-        # Deploy site assets from dist/
-        s3deploy.BucketDeployment(
-            self,
-            "DeploySite",
-            sources=[s3deploy.Source.asset(dist_path, exclude=exclude_patterns or [])],
-            destination_bucket=site_bucket,
-            distribution=distribution,
-            distribution_paths=["/*"],
-            memory_limit=deployment_memory_limit,
-            exclude=exclude_patterns or [],
-        )
+        # Deploy site assets from dist/ (skip when CI/CD handles deployment separately).
+        if not skip_deployment:
+            s3deploy.BucketDeployment(
+                self,
+                "DeploySite",
+                sources=[
+                    s3deploy.Source.asset(dist_path, exclude=exclude_patterns or [])
+                ],
+                destination_bucket=site_bucket,
+                distribution=distribution,
+                distribution_paths=["/*"],
+                memory_limit=deployment_memory_limit,
+                exclude=exclude_patterns or [],
+            )
 
         # cdk-nag suppressions for accepted deviations
         NagSuppressions.add_resource_suppressions(
