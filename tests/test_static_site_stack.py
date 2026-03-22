@@ -68,6 +68,21 @@ def test_synth_with_dashboard_name(tmp_path):
     assert assembly is not None
 
 
+def test_synth_with_deploy_role_arns(tmp_path):
+    dist = make_dist(tmp_path)
+    app = cdk.App()
+    StaticSiteStack(
+        app,
+        "TestStack",
+        domain_name="example.com",
+        dist_path=dist,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+        deploy_role_arns=["arn:aws:iam::123456789012:role/github-actions-role"],
+    )
+    assembly = app.synth()
+    assert assembly is not None
+
+
 def test_raises_without_cert_or_zone(tmp_path):
     dist = make_dist(tmp_path)
     app = cdk.App()
