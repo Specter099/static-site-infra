@@ -101,6 +101,21 @@ def test_synth_with_cognito_auth(tmp_path):
     assert assembly is not None
 
 
+def test_synth_with_skip_deployment(tmp_path):
+    dist = make_dist(tmp_path)
+    app = cdk.App()
+    StaticSiteStack(
+        app,
+        "TestStack",
+        domain_name="example.com",
+        dist_path=dist,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+        skip_deployment=True,
+    )
+    assembly = app.synth()
+    assert assembly is not None
+
+
 def test_partial_cognito_params_raises(tmp_path):
     dist = make_dist(tmp_path)
     app = cdk.App()
