@@ -199,10 +199,16 @@ class StaticSiteStack(Stack):
                     _AUTH_DIR,
                     bundling=BundlingOptions(
                         image=_lambda.Runtime.PYTHON_3_12.bundling_image,
+                        platform="linux/amd64",
                         command=[
                             "bash",
                             "-c",
-                            "pip install PyJWT cryptography urllib3 -t /asset-output"
+                            "pip install PyJWT cryptography urllib3"
+                            " --platform manylinux2014_x86_64"
+                            " --implementation cp"
+                            " --python-version 3.12"
+                            " --only-binary=:all:"
+                            " -t /asset-output"
                             " && cp *.py /asset-output/"
                             f" && echo '{auth_config}' > /asset-output/config.json",
                         ],
