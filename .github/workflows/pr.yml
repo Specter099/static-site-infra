@@ -8,3 +8,6 @@ jobs:
   review:
     uses: Specter099/.github/.github/workflows/cdk-review.yml@main
     secrets: inherit
+
+  gitleaks:
+    uses: Specter099/.github/.github/workflows/gitleaks.yml@main
