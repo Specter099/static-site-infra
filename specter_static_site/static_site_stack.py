@@ -1,7 +1,10 @@
 import json
+import re
+import shutil
+import tempfile
 from pathlib import Path
 
-from aws_cdk import (
+from aws_cdk import (  # noqa: I001
     BundlingOptions,
     CfnOutput,
     Duration,
@@ -13,6 +16,7 @@ from aws_cdk import (
     aws_cloudwatch as cloudwatch,
     aws_iam as iam,
     aws_lambda as _lambda,
+    aws_logs as logs,
     aws_route53 as route53,
     aws_s3 as s3,
     aws_s3_deployment as s3deploy,
@@ -20,7 +24,8 @@ from aws_cdk import (
 from cdk_nag import NagSuppressions
 from constructs import Construct
 
-_AUTH_DIR = str(Path(__file__).parent / "auth")
+_AUTH_DIR = Path(__file__).parent / "auth"
+_COGNITO_POOL_ID_RE = re.compile(r"^(?P<region>[a-z]{2}-[a-z]+-\d)_[A-Za-z0-9]+$")
 
 
 class StaticSiteStack(Stack):
@@ -40,6 +45,7 @@ class StaticSiteStack(Stack):
         cognito_client_id: str | None = None,
         cognito_client_secret: str | None = None,
         cognito_domain: str | None = None,
+        cognito_region: str | None = None,
         skip_deployment: bool = False,
         exclude_patterns: list[str] | None = None,
         deployment_memory_limit: int = 512,
@@ -88,30 +94,6 @@ class StaticSiteStack(Stack):
                 ),
             ],
         )
-        s3_access_logs_bucket.node.default_child.add_property_override(
-            "BucketNamespace", "account-regional"
-        )
-
-        # CloudFront access logs bucket
-        cloudfront_logs_bucket = s3.Bucket(
-            self,
-            "CloudFrontLogsBucket",
-            bucket_name=f"{domain_slug}-cf-logs-{self.account}-{self.region}-an",
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            encryption=s3.BucketEncryption.KMS_MANAGED,
-            enforce_ssl=True,
-            removal_policy=RemovalPolicy.RETAIN,
-            auto_delete_objects=False,
-            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,
-            lifecycle_rules=[
-                s3.LifecycleRule(
-                    expiration=Duration.days(180),
-                ),
-            ],
-        )
-        cloudfront_logs_bucket.node.default_child.add_property_override(
-            "BucketNamespace", "account-regional"
-        )
 
         # S3 bucket for site assets
         site_bucket = s3.Bucket(
@@ -131,9 +113,6 @@ class StaticSiteStack(Stack):
                     noncurrent_version_expiration=Duration.days(30),
                 )
             ],
-        )
-        site_bucket.node.default_child.add_property_override(
-            "BucketNamespace", "account-regional"
         )
 
         # Grant external roles read/write access to the site bucket (e.g. CI/CD pipelines).
@@ -177,18 +156,43 @@ class StaticSiteStack(Stack):
         # Lambda@Edge for Cognito authentication (optional).
         edge_lambdas = []
         if enable_auth:
-            region = cognito_user_pool_id.split("_")[0]  # type: ignore[union-attr]
-            auth_config = json.dumps(
-                {
-                    "user_pool_id": cognito_user_pool_id,
-                    "client_id": cognito_client_id,
-                    "client_secret": cognito_client_secret,
-                    "cognito_domain": cognito_domain,
-                    "redirect_uri": f"https://{domain_name}/_callback",
-                    "callback_path": "/_callback",
-                    "signout_path": "/_signout",
-                    "region": region,
-                }
+            if cognito_region:
+                region = cognito_region
+            else:
+                match = _COGNITO_POOL_ID_RE.match(cognito_user_pool_id or "")
+                if not match:
+                    raise ValueError(
+                        "Could not derive region from cognito_user_pool_id "
+                        f"{cognito_user_pool_id!r}; pass cognito_region explicitly."
+                    )
+                region = match.group("region")
+
+            # Stage auth source + config.json into a tempdir so the client secret
+            # is passed as a file (never interpolated into a shell command) and
+            # the asset hash covers the config.
+            staging = Path(tempfile.mkdtemp(prefix="static-site-auth-"))
+            for src in _AUTH_DIR.glob("*.py"):
+                shutil.copy2(src, staging / src.name)
+            (staging / "config.json").write_text(
+                json.dumps(
+                    {
+                        "user_pool_id": cognito_user_pool_id,
+                        "client_id": cognito_client_id,
+                        "client_secret": cognito_client_secret,
+                        "cognito_domain": cognito_domain,
+                        "redirect_uri": f"https://{domain_name}/_callback",
+                        "callback_path": "/_callback",
+                        "signout_path": "/_signout",
+                        "region": region,
+                    }
+                )
+            )
+
+            auth_log_group = logs.LogGroup(
+                self,
+                "AuthEdgeFunctionLogs",
+                retention=logs.RetentionDays.TWO_WEEKS,
+                removal_policy=RemovalPolicy.DESTROY,
             )
 
             auth_function = _lambda.Function(
@@ -197,7 +201,7 @@ class StaticSiteStack(Stack):
                 runtime=_lambda.Runtime.PYTHON_3_12,
                 handler="handler.handler",
                 code=_lambda.Code.from_asset(
-                    _AUTH_DIR,
+                    str(staging),
                     bundling=BundlingOptions(
                         image=_lambda.Runtime.PYTHON_3_12.bundling_image,
                         platform="linux/amd64",
@@ -210,13 +214,14 @@ class StaticSiteStack(Stack):
                             " --python-version 3.12"
                             " --only-binary=:all:"
                             " -t /asset-output"
-                            " && cp *.py /asset-output/"
-                            f" && echo '{auth_config}' > /asset-output/config.json",
+                            " && cp /asset-input/*.py /asset-input/config.json"
+                            " /asset-output/",
                         ],
                     ),
                 ),
                 timeout=Duration.seconds(5),
                 memory_size=128,
+                log_group=auth_log_group,
             )
 
             edge_lambdas.append(
@@ -239,13 +244,10 @@ class StaticSiteStack(Stack):
             domain_names=[domain_name, f"www.{domain_name}"],
             certificate=certificate,
             default_root_object="index.html",
+            # Only rewrite 404 to index.html (SPA routing). Surface 403 as-is so
+            # real auth/OAC failures are visible in CloudFront 4xx alarms rather
+            # than masked behind a 200 OK on /index.html.
             error_responses=[
-                cloudfront.ErrorResponse(
-                    http_status=403,
-                    response_http_status=200,
-                    response_page_path="/index.html",
-                    ttl=Duration.minutes(5),
-                ),
                 cloudfront.ErrorResponse(
                     http_status=404,
                     response_http_status=200,
@@ -360,20 +362,11 @@ class StaticSiteStack(Stack):
 
         # cdk-nag suppressions for accepted deviations
         NagSuppressions.add_resource_suppressions(
-            cloudfront_logs_bucket,
-            [
-                {
-                    "id": "AwsSolutions-S1",
-                    "reason": "CloudFrontLogsBucket is a logging destination; enabling access logs on it would be circular. CloudFront standard logging is disabled due to Free pricing plan incompatibility (HTTP 400).",
-                }
-            ],
-        )
-        NagSuppressions.add_resource_suppressions(
             distribution,
             [
                 {
                     "id": "AwsSolutions-CFR3",
-                    "reason": "CloudFront standard logging is incompatible with the Free pricing plan (returns HTTP 400). S3 access logging is active at the bucket layer via S3AccessLogsBucket.",
+                    "reason": "CloudFront standard logging is incompatible with the Free pricing plan (returns HTTP 400). S3 access logging is active at the origin bucket layer via S3AccessLogsBucket.",
                 }
             ],
         )
@@ -416,13 +409,6 @@ class StaticSiteStack(Stack):
             "SiteUrl",
             value=f"https://{domain_name}",
             description="Site URL",
-        )
-
-        CfnOutput(
-            self,
-            "CloudFrontLogsBucketName",
-            value=cloudfront_logs_bucket.bucket_name,
-            description="CloudFront Logs Bucket Name",
         )
 
         CfnOutput(

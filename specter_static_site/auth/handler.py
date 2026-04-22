@@ -1,9 +1,8 @@
 """Lambda@Edge viewer-request handler for Cognito authentication."""
 
-import hashlib
 import json
 import logging
-import os
+import secrets
 import urllib.parse
 from pathlib import Path
 
@@ -51,7 +50,7 @@ def _redirect(url: str, extra_headers: dict | None = None) -> dict:
 
 def _generate_state() -> str:
     """Generate a cryptographically random state parameter for CSRF protection."""
-    return hashlib.sha256(os.urandom(32)).hexdigest()
+    return secrets.token_urlsafe(32)
 
 
 def _authorize_url(state: str) -> str:
@@ -79,6 +78,17 @@ def _redirect_to_login() -> dict:
         ]
     }
     return _redirect(_authorize_url(state), extra_headers=state_cookie)
+
+
+def _redirect_to_login_clearing_cookies() -> dict:
+    """Redirect to login and invalidate any existing auth cookies."""
+    state = _generate_state()
+    cookie_headers = [
+        {"key": "Set-Cookie", "value": _set_cookie("auth_state", state, 300)},
+        {"key": "Set-Cookie", "value": _clear_cookie("id_token")},
+        {"key": "Set-Cookie", "value": _clear_cookie("refresh_token")},
+    ]
+    return _redirect(_authorize_url(state), extra_headers={"set-cookie": cookie_headers})
 
 
 def _safe_redirect_path(uri: str, qs: str) -> str:
@@ -116,19 +126,24 @@ def handler(event, context):  # noqa: ARG001
     # Check for valid id_token cookie.
     id_token = cookies.get("id_token")
     if id_token:
-        try:
-            from jwt_validator import validate_token
+        import jwt as _jwt
+        from jwt_validator import validate_token
 
+        try:
             validate_token(id_token, USER_POOL_ID, CLIENT_ID, REGION)
             return request  # Valid token — pass through.
-        except Exception as e:
-            logger.warning("Token validation failed: %s", e)
-            # Token invalid or expired — try refresh.
+        except _jwt.ExpiredSignatureError:
+            # Only expired tokens are eligible for a refresh attempt.
             refresh_token = cookies.get("refresh_token")
             if refresh_token:
                 return _try_refresh(refresh_token, uri, querystring)
+            return _redirect_to_login()
+        except _jwt.InvalidTokenError as e:
+            # Tampered, malformed, or wrong-audience token — fail closed.
+            logger.warning("Invalid id_token, clearing cookies: %s", e)
+            return _redirect_to_login_clearing_cookies()
 
-    # No valid token — redirect to login.
+    # No token — redirect to login.
     return _redirect_to_login()
 
 
@@ -140,11 +155,15 @@ def _handle_callback(querystring: str, cookies: dict) -> dict:
     if not code:
         return _redirect("/")
 
-    # Validate state parameter against cookie to prevent CSRF.
+    # Validate state parameter against cookie to prevent CSRF. Use constant-time
+    # comparison and do not log the state values themselves.
     expected_state = cookies.get("auth_state")
-    logger.info("callback: state=%s expected=%s", state, expected_state)
-    if not state or not expected_state or state != expected_state:
-        logger.warning("State mismatch")
+    if (
+        not state
+        or not expected_state
+        or not secrets.compare_digest(state, expected_state)
+    ):
+        logger.warning("Callback state mismatch")
         return _redirect_to_login()
 
     from cognito_client import exchange_code
@@ -184,16 +203,26 @@ def _handle_signout() -> dict:
         {"key": "Set-Cookie", "value": _clear_cookie("refresh_token")},
         {"key": "Set-Cookie", "value": _clear_cookie("auth_state")},
     ]
-    logout_url = f"https://{COGNITO_DOMAIN}/logout?client_id={CLIENT_ID}&logout_uri={urllib.parse.quote(REDIRECT_URI.replace('/_callback', '/'))}"
+    logout_uri = REDIRECT_URI.replace("/_callback", "/")
+    params = urllib.parse.urlencode(
+        {"client_id": CLIENT_ID, "logout_uri": logout_uri}
+    )
+    logout_url = f"https://{COGNITO_DOMAIN}/logout?{params}"
     return _redirect(logout_url, extra_headers={"set-cookie": cookie_headers})
 
 
 def _try_refresh(refresh_token: str, uri: str, querystring: str) -> dict:
     from cognito_client import refresh_tokens
 
-    tokens = refresh_tokens(refresh_token, COGNITO_DOMAIN, CLIENT_ID, CLIENT_SECRET)
+    try:
+        tokens = refresh_tokens(
+            refresh_token, COGNITO_DOMAIN, CLIENT_ID, CLIENT_SECRET
+        )
+    except Exception as e:
+        logger.warning("Refresh failed: %s", e)
+        return _redirect_to_login_clearing_cookies()
     if not tokens or "id_token" not in tokens:
-        return _redirect_to_login()
+        return _redirect_to_login_clearing_cookies()
 
     # Refresh succeeded — set new cookie and redirect to validated path.
     target = _safe_redirect_path(uri, querystring)
