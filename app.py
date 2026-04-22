@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Synth-only example app used by CI. Not a user-facing example."""
+
 import os
 import tempfile
 
@@ -7,7 +9,8 @@ import aws_cdk as cdk
 from specter_static_site import StaticSiteStack
 
 _dist = tempfile.mkdtemp()
-open(os.path.join(_dist, "index.html"), "w").write("<html>CI synth</html>")
+with open(os.path.join(_dist, "index.html"), "w") as f:
+    f.write("<html>CI synth</html>")
 
 app = cdk.App()
 StaticSiteStack(
