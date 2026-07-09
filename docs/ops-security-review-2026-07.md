@@ -1,10 +1,12 @@
 # Operational & Security Review — static-site-infra
 
-**Date:** 2026-07-09
+**Date:** 2026-07-09 (Revision 2 — second review pass, same date)
 **Scope:** `specter_static_site/static_site_stack.py` (CDK stack), `specter_static_site/auth/` (Lambda@Edge Cognito OIDC handler, token client, JWT validator), `.github/workflows/` (CI/CD), packaging (`pyproject.toml`, requirements files), documentation (`README.md`, `CLAUDE.md`, `SECURITY.md`), and tests.
 **Package version reviewed:** 2.4.0 (commit `b34df11`)
 
 This is a review-only document; no code changes accompany it. Findings are prioritized P0 (critical) through P3 (low), each with location, impact, and a concrete recommendation.
+
+**Revision 2:** a second independent review pass re-verified all findings from the first pass against the code (all 22 stand; none retracted) and extended coverage to the complete test suite, which the first pass had only skimmed. It adds three findings — P2-11 (sign-out does not revoke the refresh token), P3-6 (OAuth error responses cause a silent redirect loop), and P3-7 (test gap for redirect-validation edge cases) — and refines P2-2, P2-3, and the positive observations.
 
 ---
 
@@ -16,8 +18,8 @@ The project is in good shape overall: origin access is OAC-based, all buckets bl
 |---|---|---|
 | P0 | 2 | Plaintext client secret in Lambda package; alarms with no actions |
 | P1 | 5 | Unpinned bundling deps; mutable CI refs; region validation; edge log retention; destructive removal policy |
-| P2 | 10 | OIDC hardening, redirect edge case, token rotation, JWKS amplification, bucket-name overflow, CSP, lockfile, temp-dir secret |
-| P3 | 5 | Doc drift, DNS records, cookie prefix, metric semantics, construct-ID collision |
+| P2 | 11 | OIDC hardening, redirect edge case, token rotation, sign-out revocation, JWKS amplification, bucket-name overflow, CSP, lockfile, temp-dir secret |
+| P3 | 7 | Doc drift, DNS records, cookie prefix, metric semantics, construct-ID collision, error-param loop, redirect test gap |
 
 ---
 
@@ -122,7 +124,7 @@ The flow uses a confidential client (secret-authenticated token exchange) and a 
 
 The validator rejects `//`-prefixed paths and anything with a scheme/netloc, but a path like `/\evil.com` passes: `urllib.parse.urlparse` does not treat `\` as an authority separator, yet some browsers normalize backslashes to slashes in the `Location` header, turning it into protocol-relative `//evil.com`. Exploitability is limited — the path only flows into a redirect after a *successful* token refresh, so the victim must already be authenticated and the attacker must control the requested URI — but the fix is one line.
 
-**Recommendation:** Reject any candidate path containing `\` or ASCII control characters before the existing checks.
+**Recommendation:** Reject any candidate path containing `\` or ASCII control characters before the existing checks. Note that `test_safe_redirect_path` in `tests/test_auth_handler.py` covers `//`, absolute URLs, and `javascript:` but not these variants — add the missing cases alongside the fix (see P3-7).
 
 ### P2-3. Refresh-token rotation not handled
 
@@ -130,7 +132,15 @@ The validator rejects `//`-prefixed paths and anything with a scheme/netloc, but
 
 `_try_refresh` sets only the new `id_token` cookie. If the Cognito app client enables refresh-token rotation, the token endpoint returns a **new** refresh token and invalidates the old one — the handler drops it, so the stale cookie fails on the next refresh and the user is silently logged out hourly.
 
-**Recommendation:** When the refresh response contains `refresh_token`, set it as a cookie (same pattern as `_handle_callback` lines 189-195).
+**Recommendation:** When the refresh response contains `refresh_token`, set it as a cookie (same pattern as `_handle_callback` lines 189-195). The surrounding error handling is otherwise sound: `refresh_tokens` returns `{}` on non-200 (vs. `exchange_code` raising), and the caller checks both cases with cookie-clearing fallbacks — that asymmetry is tested and handled; only the rotation gap needs fixing.
+
+### P2-11. Sign-out does not revoke the refresh token
+
+**Location:** `specter_static_site/auth/handler.py:200-211`
+
+`_handle_signout` clears the cookies (a client-side-only action) and redirects to Cognito's `/logout` endpoint, which ends the hosted-UI session — but it does **not** revoke the refresh token. A refresh token that was exfiltrated (malware, device theft, backup leakage) remains valid for up to its full 30-day lifetime even after the user explicitly signs out, and can mint fresh id tokens the whole time.
+
+**Recommendation:** During sign-out, when a `refresh_token` cookie is present, call Cognito's `/oauth2/revoke` endpoint (client-secret-authenticated, same pattern as `cognito_client.py`) before redirecting to `/logout`; treat revocation failures as non-fatal (still clear cookies and redirect). Requires "token revocation" enabled on the app client (the Cognito default). Also worth documenting: the cleared `id_token` remains cryptographically valid until its `exp` (≤1 h) — anyone holding a copy passes validation until then. That is inherent to stateless JWT auth at the edge and acceptable, but it should be a stated assumption.
 
 ### P2-4. JWKS force-refresh amplification
 
@@ -220,6 +230,20 @@ Because 404s are rewritten to `200 /index.html`, real 404s never count toward th
 
 The construct ID is derived from the last ARN segment (`role_arn.split('/')[-1]`). Two roles with the same name in different accounts or IAM paths collide at synth with a duplicate-construct error. Use a hash of the full ARN (or the list index) in the ID.
 
+### P3-6. OAuth error responses cause a silent redirect loop
+
+**Location:** `specter_static_site/auth/handler.py:150-156`
+
+When Cognito redirects back to `/_callback` with an `error` parameter instead of a `code` (e.g. `error=access_denied` when a user cancels login, or a misconfigured app client), `_handle_callback` redirects to `/` — which, with no token present, immediately bounces back to the Cognito authorize page. The user cycles between Cognito and the site and never sees an explanation. Bounded by user interaction, so it's an annoyance rather than a vulnerability.
+
+**Recommendation:** Detect the `error` query parameter in the callback and return a small static 403/error response (and log the `error`/`error_description` values) instead of redirecting to `/`.
+
+### P3-7. Test gap: redirect-validation edge cases not covered
+
+**Location:** `tests/test_auth_handler.py` (`test_safe_redirect_path` parametrize cases)
+
+The existing cases cover `//`-prefixed, absolute-URL, empty, and `javascript:` inputs — good — but not backslash variants (`/\evil.com`, `/\\evil.com`) or paths with control characters, which are exactly the inputs P2-2 identifies as risky. Add them (expected result `/`) together with the code fix so the regression stays pinned.
+
 ---
 
 ## Positive observations
@@ -229,7 +253,7 @@ The construct ID is derived from the last ARN segment (`role_arn.split('/')[-1]`
 - **Deliberate 403 handling:** only 404 is rewritten for SPA routing, so auth/OAC failures remain visible in metrics — with the reasoning documented inline.
 - **CI hygiene:** matrix tests on 3.11/3.12, ruff with the security (`S`) ruleset, `pip-audit`, gitleaks, IAM Access Analyzer against synthesized templates, Dependabot for both pip and Actions, and default-restrictive `permissions: contents: read` on workflows.
 - **cdk-nag** enabled with narrowly-scoped, individually-justified suppressions.
-- **Good test coverage** for a construct library: synth assertions per parameter combination plus real unit tests for the auth handler, JWT validator, and Cognito client.
+- **Good test coverage** for a construct library: synth assertions per parameter combination plus real unit tests for the auth handler, JWT validator, and Cognito client. The security-relevant behaviors are explicitly pinned by tests: invalid tokens must *not* trigger a refresh attempt (fail-closed), HS256 algorithm-downgrade tokens are rejected, the JWKS kid-miss path retries exactly once, the authorization code is URL-encoded in the token exchange, 403 is asserted *not* to be rewritten to `index.html`, and a regression test guards against reintroducing an unused CloudFront logs bucket. The JWT validator tests sign real RS256 tokens with a locally generated keypair rather than mocking the crypto.
 
 ---
 
@@ -240,5 +264,5 @@ The construct ID is derived from the last ARN segment (`role_arn.split('/')[-1]`
 3. **P1-1 / P1-2** — pin Lambda bundling deps and CI refs (quick, high-leverage supply-chain fixes).
 4. **P1-3 / P2-5** — synth-time validation (region, bucket-name length): cheap guards against confusing deploy failures.
 5. **P1-5** — `removal_policy` parameter defaulting to RETAIN.
-6. **P1-4, P2-1…P2-4** — auth/logging hardening batch (edge log retention, PKCE/nonce, backslash-path rejection, refresh rotation, JWKS rate limit).
+6. **P1-4, P2-1…P2-4, P2-11** — auth/logging hardening batch (edge log retention, PKCE/nonce, backslash-path rejection + tests, refresh rotation, JWKS rate limit, sign-out revocation).
 7. Remaining P2/P3 as maintenance (CSP param, deep-link return, lockfile, docs, DNS records).
