@@ -1,3 +1,9 @@
 ruff
 pip-audit
 pytest>=8.0,<9.1
+boto3
+# Test-time deps for exercising the Lambda@Edge handler code directly
+# (the Lambda bundle pins its own copies in specter_static_site/auth/).
+PyJWT>=2.8.0
+cryptography>=41.0.0
+urllib3>=2.0.0

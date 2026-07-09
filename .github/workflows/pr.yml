@@ -4,10 +4,23 @@ on:
   pull_request:
     branches: [main]
 
+# Reusable workflows are pinned to commit SHAs (mutable-ref supply-chain
+# hardening); Dependabot's github-actions ecosystem keeps the pins fresh.
+# Each calling job explicitly grants the permissions its reusable workflow's
+# jobs request — with restricted default workflow permissions, an ungranted
+# request fails the run at startup.
 jobs:
   review:
-    uses: Specter099/.github/.github/workflows/cdk-review.yml@main
-    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: Specter099/.github/.github/workflows/cdk-review.yml@2633bc5b281230a26aefdd42ee9e6243b0a7ad1f # main 2026-07-09
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
 
   gitleaks:
-    uses: Specter099/.github/.github/workflows/gitleaks.yml@main
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: Specter099/.github/.github/workflows/gitleaks.yml@2633bc5b281230a26aefdd42ee9e6243b0a7ad1f # main 2026-07-09
