@@ -1,6 +1,6 @@
 # Operational & Security Review — static-site-infra
 
-**Date:** 2026-07-09 (Revision 2 — second review pass, same date)
+**Date:** 2026-07-09 (Revision 3 — remediation status added; see the table at the end)
 **Scope:** `specter_static_site/static_site_stack.py` (CDK stack), `specter_static_site/auth/` (Lambda@Edge Cognito OIDC handler, token client, JWT validator), `.github/workflows/` (CI/CD), packaging (`pyproject.toml`, requirements files), documentation (`README.md`, `CLAUDE.md`, `SECURITY.md`), and tests.
 **Package version reviewed:** 2.4.0 (commit `b34df11`)
 
@@ -266,3 +266,37 @@ The existing cases cover `//`-prefixed, absolute-URL, empty, and `javascript:` i
 5. **P1-5** — `removal_policy` parameter defaulting to RETAIN.
 6. **P1-4, P2-1…P2-4, P2-11** — auth/logging hardening batch (edge log retention, PKCE/nonce, backslash-path rejection + tests, refresh rotation, JWKS rate limit, sign-out revocation).
 7. Remaining P2/P3 as maintenance (CSP param, deep-link return, lockfile, docs, DNS records).
+
+---
+
+## Remediation status (v3.0.0, this branch)
+
+All findings were remediated in commits `bf83b4c` (P0 + secret handling), `94197ba` (supply chain + synth guardrails), `3eedae3` (redirect/cookie/UX hardening), `e1115d4` (OIDC protocol hardening + CSP), and the docs/DNS commit following them. Breaking changes are documented in README "Breaking changes in v3".
+
+| Finding | Status | Notes |
+|---|---|---|
+| P0-1 secret in Lambda package | **Fixed** | `cognito_client_secret_arn` (Secrets Manager, cold-start fetch + cache); rotate the old secret after upgrading |
+| P0-2 alarms notify no one | **Fixed** | SNS topic (created or imported) with alarm + OK actions on both alarms |
+| P1-1 unpinned bundling deps | **Fixed** | Hash-pinned `auth/requirements.txt` compiled from `requirements.in`, installed with `--require-hashes` |
+| P1-2 mutable CI refs / `secrets: inherit` | **Fixed** | All workflows/actions SHA-pinned; explicit `AWS_ROLE_ARN` pass in pr.yml; backup.yml relies on its Environment secret (verify the `backup` Environment has `AWS_ROLE_ARN` configured — one-time settings check) |
+| P1-3 no us-east-1 validation | **Fixed** | Synth-time error (resolved region) or warning (env-agnostic) |
+| P1-4 edge log retention | **Mitigated + documented** | Per-request logging downgraded to DEBUG; per-region replica log groups are outside CDK's control — README caveat; full fix needs org-level automation |
+| P1-5 site bucket DESTROY default | **Fixed** | Defaults to RETAIN; DESTROY is opt-in via `removal_policy` |
+| P2-1 no PKCE/nonce | **Fixed** | S256 PKCE + nonce minted at login, verifier passed to exchange, nonce claim enforced on the validated id_token |
+| P2-2 backslash open redirect | **Fixed** | `_safe_redirect_path` rejects `\\` and control chars |
+| P2-3 refresh rotation dropped | **Fixed** | Rotated refresh token persisted as a cookie |
+| P2-4 JWKS force-refresh amplification | **Fixed** | Forced refresh rate-limited to one per 30s per container |
+| P2-5 bucket-name overflow | **Fixed** | Synth-time validation with worst-case token lengths; `bucket_name_prefix` escape hatch |
+| P2-6 no CloudFront access logs | **Documented** | Deliberate Free-plan tradeoff; forensic limitation spelled out in README |
+| P2-7 no CSP | **Fixed** | Optional `csp` param builds a custom ResponseHeadersPolicy mirroring the managed one |
+| P2-8 deep link lost | **Fixed** | `__Host-auth_redirect` cookie round-trips the validated path+query |
+| P2-9 no lockfile | **Fixed** | `requirements-lock.txt` (pip-compile) drives CI installs |
+| P2-10 secret-bearing tempdir | **Fixed** | Staging dir removed after asset staging (and no longer contains the secret) |
+| P2-11 sign-out doesn't revoke | **Fixed** | Best-effort `/oauth2/revoke` before the logout redirect |
+| P3-1 doc drift | **Fixed** | README/CLAUDE.md reconciled (bucket count, retention, version pin, full param table) |
+| P3-2 no DNS records / www SAN | **Fixed (DNS) / documented (SAN)** | `create_dns_records` creates apex+www A/AAAA aliases; imported-cert SAN coverage can't be checked at credential-free synth — documented |
+| P3-3 `__Host-` prefix | **Fixed** | All auth cookies prefixed; legacy names actively cleared |
+| P3-4 4xx metric semantics | **Fixed** | Alarm description carries the SPA-rewrite caveat |
+| P3-5 construct-ID collision | **Fixed** | IDs use index + full-ARN hash |
+| P3-6 OAuth error loop | **Fixed** | Static 403 page; IdP values logged, never reflected |
+| P3-7 redirect test gap | **Fixed** | Backslash/control-char cases added to `test_safe_redirect_path` |

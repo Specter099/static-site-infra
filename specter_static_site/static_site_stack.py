@@ -22,6 +22,7 @@ from aws_cdk import (  # noqa: I001
     aws_lambda as _lambda,
     aws_logs as logs,
     aws_route53 as route53,
+    aws_route53_targets as route53_targets,
     aws_s3 as s3,
     aws_s3_deployment as s3deploy,
     aws_secretsmanager as secretsmanager,
@@ -63,6 +64,7 @@ class StaticSiteStack(Stack):
         removal_policy: RemovalPolicy = RemovalPolicy.RETAIN,
         bucket_name_prefix: str | None = None,
         csp: str | None = None,
+        create_dns_records: bool = False,
         skip_deployment: bool = False,
         exclude_patterns: list[str] | None = None,
         deployment_memory_limit: int = 512,
@@ -74,6 +76,12 @@ class StaticSiteStack(Stack):
             description=f"Static site hosting for {domain_name}",
             **kwargs,
         )
+
+        if create_dns_records and not hosted_zone_id:
+            raise ValueError(
+                "create_dns_records=True requires hosted_zone_id so alias "
+                "records can be created."
+            )
 
         # Validate Cognito parameters: all or none.
         cognito_params = [
@@ -374,6 +382,32 @@ class StaticSiteStack(Stack):
             ],
             web_acl_id=web_acl_id,
         )
+
+        # Optional Route 53 alias records for apex + www. Both point at the
+        # distribution; the certificate must cover both names (auto-created
+        # certs do — imported certs are the consumer's responsibility).
+        if create_dns_records and hosted_zone:
+            cf_target = route53.RecordTarget.from_alias(
+                route53_targets.CloudFrontTarget(distribution)
+            )
+            route53.ARecord(self, "ApexAliasA", zone=hosted_zone, target=cf_target)
+            route53.AaaaRecord(
+                self, "ApexAliasAAAA", zone=hosted_zone, target=cf_target
+            )
+            route53.ARecord(
+                self,
+                "WwwAliasA",
+                zone=hosted_zone,
+                record_name=f"www.{domain_name}",
+                target=cf_target,
+            )
+            route53.AaaaRecord(
+                self,
+                "WwwAliasAAAA",
+                zone=hosted_zone,
+                record_name=f"www.{domain_name}",
+                target=cf_target,
+            )
 
         # Alarm notifications: import an existing topic, or create one. A
         # default topic with no subscription is still useful — it can be

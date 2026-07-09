@@ -59,11 +59,20 @@ tests/
 
 ## Architecture
 
-- **S3 buckets**: Three buckets per site — site assets, S3 access logs, CloudFront logs. Names follow `{domain-slug}-{purpose}-{account}-{region}-an` convention.
-- **CloudFront**: OAC-based origin access, HTTPS redirect, security response headers. 403/404 errors rewrite to `/index.html` (SPA support).
-- **Cognito auth** (optional): All four Cognito params must be provided together or omitted. Lambda@Edge handles OIDC authorization code flow with CSRF state cookies, JWT validation, and token refresh.
-- **CloudWatch**: Dashboard with error rate and request graphs. Alarms on 5xx (>5%) and 4xx (>10%) error rates.
-- **cdk-nag**: Suppressions are documented inline for CDK-managed resources (BucketDeployment Lambda, logging circularity).
+- **S3 buckets**: Two buckets per site — site assets and S3 access logs (CloudFront standard logging is disabled; incompatible with the Free pricing plan). Names follow `{domain-slug}-{purpose}-{account}-{region}-an` convention, validated against S3's 63-char limit at synth.
+- **CloudFront**: OAC-based origin access, HTTPS redirect, security response headers (optional CSP via custom policy). Only 404 rewrites to `/index.html` (SPA support); 403 surfaces as-is so auth/OAC failures stay visible.
+- **Cognito auth** (optional): All four Cognito params must be provided together or omitted. Lambda@Edge handles the OIDC authorization code flow with PKCE + nonce, CSRF state cookies (`__Host-`-prefixed), JWT validation, refresh-token rotation, and sign-out revocation. The client secret is fetched from Secrets Manager (us-east-1) at cold start. Requires the stack in us-east-1 (validated at synth).
+- **CloudWatch**: Dashboard with error rate and request graphs. Alarms on 5xx (>5%) and 4xx (>10%) error rates, wired to an SNS topic (alarm + OK actions).
+- **cdk-nag**: Suppressions are documented inline for CDK-managed resources (BucketDeployment Lambda, logging circularity, SNS topic encryption).
+
+## Breaking changes in v3
+
+Do not reintroduce pre-v3 assumptions: `cognito_client_secret` is now
+`cognito_client_secret_arn` (Secrets Manager ARN, never the raw secret); the
+site bucket defaults to `RemovalPolicy.RETAIN` (DESTROY is opt-in); auth
+cookies are `__Host-`-prefixed; `deploy_role_arns` construct IDs hash the full
+ARN; synth validates us-east-1 and bucket-name length. See README "Breaking
+changes in v3".
 
 ## Key Constructor Parameters
 
@@ -80,6 +89,8 @@ tests/
 | `deploy_role_arns` | IAM role ARNs granted read/write on the site bucket |
 | `removal_policy` | Site bucket removal policy; defaults to RETAIN (pass DESTROY for dev/test) |
 | `bucket_name_prefix` | Overrides the domain slug in bucket names (S3's 63-char limit) |
+| `csp` | Content-Security-Policy value (builds a custom response headers policy) |
+| `create_dns_records` | Create Route 53 alias records for apex + www (requires `hosted_zone_id`) |
 
 ## Testing
 

@@ -229,6 +229,43 @@ def test_site_bucket_retained_by_default(tmp_path):
     assert not template.find_resources("Custom::S3AutoDeleteObjects")
 
 
+def test_create_dns_records(tmp_path):
+    stack, _ = _synth(
+        tmp_path,
+        hosted_zone_id="Z1234567890",
+        create_dns_records=True,
+        env=cdk.Environment(account="123456789012", region="us-east-1"),
+    )
+    template = assertions.Template.from_stack(stack)
+    records = template.find_resources("AWS::Route53::RecordSet")
+    assert len(records) == 4  # apex + www, A + AAAA
+    names = {r["Properties"]["Name"] for r in records.values()}
+    assert names == {"example.com.", "www.example.com."}
+
+
+def test_no_dns_records_by_default(tmp_path):
+    stack, _ = _synth(
+        tmp_path,
+        hosted_zone_id="Z1234567890",
+        env=cdk.Environment(account="123456789012", region="us-east-1"),
+    )
+    template = assertions.Template.from_stack(stack)
+    assert not template.find_resources("AWS::Route53::RecordSet")
+
+
+def test_create_dns_records_requires_hosted_zone(tmp_path):
+    app = cdk.App()
+    with pytest.raises(ValueError, match="hosted_zone_id"):
+        StaticSiteStack(
+            app,
+            "TestStack",
+            domain_name="example.com",
+            dist_path=make_dist(tmp_path),
+            certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+            create_dns_records=True,
+        )
+
+
 def test_csp_param_creates_custom_headers_policy(tmp_path):
     stack, _ = _synth(
         tmp_path,
