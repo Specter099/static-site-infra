@@ -1,7 +1,7 @@
 # CI lockfile input — pins the full test/lint environment for reproducible CI.
 # Compile: .venv/bin/pip-compile requirements-lock.in -o requirements-lock.txt
 # Keep ranges in sync with pyproject.toml; Dependabot refreshes the output.
-aws-cdk-lib>=2.244,<2.255
+aws-cdk-lib>=2.244,<2.262
 constructs~=10.6.0
 cdk-nag>=2.37.55,<2.39.0
 pytest~=9.0.2
