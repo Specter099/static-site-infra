@@ -6,7 +6,11 @@ on:
 
 jobs:
   validate:
-    # Pinned to a commit SHA (mutable-ref supply-chain hardening).
+    # Pinned to a commit SHA (mutable-ref supply-chain hardening). The
+    # permissions grant mirrors what the reusable workflow's job requests.
+    permissions:
+      contents: read
+      pull-requests: write
     uses: Specter099/.github/.github/workflows/validate-bucket-names.yml@2633bc5b281230a26aefdd42ee9e6243b0a7ad1f # main 2026-07-09
     with:
       scan-path: specter_static_site/
