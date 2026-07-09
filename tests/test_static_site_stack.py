@@ -229,6 +229,47 @@ def test_site_bucket_retained_by_default(tmp_path):
     assert not template.find_resources("Custom::S3AutoDeleteObjects")
 
 
+def test_csp_param_creates_custom_headers_policy(tmp_path):
+    stack, _ = _synth(
+        tmp_path,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+        csp="default-src 'self'",
+    )
+    template = assertions.Template.from_stack(stack)
+    template.resource_count_is("AWS::CloudFront::ResponseHeadersPolicy", 1)
+    template.has_resource_properties(
+        "AWS::CloudFront::ResponseHeadersPolicy",
+        assertions.Match.object_like(
+            {
+                "ResponseHeadersPolicyConfig": assertions.Match.object_like(
+                    {
+                        "SecurityHeadersConfig": assertions.Match.object_like(
+                            {
+                                "ContentSecurityPolicy": {
+                                    "ContentSecurityPolicy": "default-src 'self'",
+                                    "Override": True,
+                                },
+                                "StrictTransportSecurity": assertions.Match.object_like(
+                                    {"AccessControlMaxAgeSec": 31536000}
+                                ),
+                            }
+                        )
+                    }
+                )
+            }
+        ),
+    )
+
+
+def test_no_csp_uses_managed_security_headers_policy(tmp_path):
+    stack, _ = _synth(
+        tmp_path,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+    )
+    template = assertions.Template.from_stack(stack)
+    template.resource_count_is("AWS::CloudFront::ResponseHeadersPolicy", 0)
+
+
 def test_site_bucket_destroy_opt_in(tmp_path):
     stack, _ = _synth(
         tmp_path,

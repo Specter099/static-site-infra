@@ -45,16 +45,19 @@ def exchange_code(
     cognito_domain: str,
     client_id: str,
     client_secret_arn: str,
+    *,
+    code_verifier: str | None = None,
 ) -> dict:
     """Exchange an authorization code for tokens."""
-    body = urllib.parse.urlencode(
-        {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": redirect_uri,
-            "client_id": client_id,
-        }
-    )
+    form = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "client_id": client_id,
+    }
+    if code_verifier:
+        form["code_verifier"] = code_verifier
+    body = urllib.parse.urlencode(form)
     resp = http.request(
         "POST",
         f"https://{cognito_domain}/oauth2/token",
@@ -101,3 +104,32 @@ def refresh_tokens(
     if resp.status != 200:
         return {}
     return json.loads(resp.data.decode())
+
+
+def revoke_token(
+    refresh_token: str,
+    cognito_domain: str,
+    client_id: str,
+    client_secret_arn: str,
+) -> bool:
+    """Revoke a refresh token at sign-out. Non-raising by design — sign-out
+    must never block on revocation failure (mirrors refresh_tokens's style).
+    Requires token revocation enabled on the app client (Cognito default).
+    """
+    body = urllib.parse.urlencode({"token": refresh_token, "client_id": client_id})
+    try:
+        resp = http.request(
+            "POST",
+            f"https://{cognito_domain}/oauth2/revoke",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": _auth_header(
+                    client_id, _get_client_secret(client_secret_arn)
+                ),
+            },
+            body=body,
+            timeout=_TIMEOUT,
+        )
+    except Exception:
+        return False
+    return resp.status == 200

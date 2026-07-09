@@ -62,6 +62,7 @@ class StaticSiteStack(Stack):
         alarm_email: str | None = None,
         removal_policy: RemovalPolicy = RemovalPolicy.RETAIN,
         bucket_name_prefix: str | None = None,
+        csp: str | None = None,
         skip_deployment: bool = False,
         exclude_patterns: list[str] | None = None,
         deployment_memory_limit: int = 512,
@@ -312,6 +313,41 @@ class StaticSiteStack(Stack):
                 )
             )
 
+        # Response headers: the managed SECURITY_HEADERS policy by default.
+        # When a CSP is supplied, build a custom policy mirroring the managed
+        # policy's other headers (it cannot be extended in place).
+        if csp:
+            response_headers_policy = cloudfront.ResponseHeadersPolicy(
+                self,
+                "SecurityHeadersWithCsp",
+                security_headers_behavior=cloudfront.ResponseSecurityHeadersBehavior(
+                    content_security_policy=cloudfront.ResponseHeadersContentSecurityPolicy(
+                        content_security_policy=csp, override=True
+                    ),
+                    # Values below mirror AWS's managed SecurityHeadersPolicy.
+                    content_type_options=cloudfront.ResponseHeadersContentTypeOptions(
+                        override=True
+                    ),
+                    frame_options=cloudfront.ResponseHeadersFrameOptions(
+                        frame_option=cloudfront.HeadersFrameOption.SAMEORIGIN,
+                        override=True,
+                    ),
+                    referrer_policy=cloudfront.ResponseHeadersReferrerPolicy(
+                        referrer_policy=cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
+                        override=True,
+                    ),
+                    strict_transport_security=cloudfront.ResponseHeadersStrictTransportSecurity(
+                        access_control_max_age=Duration.seconds(31536000),
+                        override=True,
+                    ),
+                    xss_protection=cloudfront.ResponseHeadersXSSProtection(
+                        protection=True, mode_block=True, override=True
+                    ),
+                ),
+            )
+        else:
+            response_headers_policy = cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS
+
         # CloudFront distribution
         distribution = cloudfront.Distribution(
             self,
@@ -319,7 +355,7 @@ class StaticSiteStack(Stack):
             default_behavior=cloudfront.BehaviorOptions(
                 origin=origins.S3BucketOrigin.with_origin_access_control(site_bucket),
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                response_headers_policy=cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+                response_headers_policy=response_headers_policy,
                 edge_lambdas=edge_lambdas or None,
             ),
             domain_names=[domain_name, f"www.{domain_name}"],

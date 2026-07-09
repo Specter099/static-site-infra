@@ -90,6 +90,43 @@ def test_refresh_tokens_success(cc, monkeypatch):
     assert cc.refresh_tokens("rt", "d", "ci", _SECRET_ARN) == {"id_token": "new"}
 
 
+def test_exchange_code_includes_pkce_verifier(cc, monkeypatch):
+    http = _fake_http()
+    monkeypatch.setattr(cc, "http", http)
+    cc.exchange_code("c", "u", "d", "ci", _SECRET_ARN, code_verifier="the-verifier")
+    body = http.request.call_args.kwargs["body"]
+    assert "code_verifier=the-verifier" in body
+
+
+def test_exchange_code_omits_verifier_when_absent(cc, monkeypatch):
+    http = _fake_http()
+    monkeypatch.setattr(cc, "http", http)
+    cc.exchange_code("c", "u", "d", "ci", _SECRET_ARN)
+    assert "code_verifier" not in http.request.call_args.kwargs["body"]
+
+
+def test_revoke_token_success(cc, monkeypatch):
+    http = _fake_http(status=200, payload=b"")
+    monkeypatch.setattr(cc, "http", http)
+    assert cc.revoke_token("rt", "d", "ci", _SECRET_ARN) is True
+    body = http.request.call_args.kwargs["body"]
+    assert "token=rt" in body
+    assert "client_id=ci" in body
+    assert "/oauth2/revoke" in http.request.call_args.args[1]
+
+
+def test_revoke_token_failure_returns_false(cc, monkeypatch):
+    monkeypatch.setattr(cc, "http", _fake_http(status=400, payload=b"no"))
+    assert cc.revoke_token("rt", "d", "ci", _SECRET_ARN) is False
+
+
+def test_revoke_token_network_error_returns_false(cc, monkeypatch):
+    http = MagicMock()
+    http.request.side_effect = OSError("connect timeout")
+    monkeypatch.setattr(cc, "http", http)
+    assert cc.revoke_token("rt", "d", "ci", _SECRET_ARN) is False
+
+
 def test_client_secret_fetched_once_and_cached(cc, monkeypatch):
     monkeypatch.setattr(cc, "http", _fake_http())
     cc.exchange_code("c", "u", "d", "ci", _SECRET_ARN)

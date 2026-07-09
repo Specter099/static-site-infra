@@ -1,5 +1,7 @@
 """Lambda@Edge viewer-request handler for Cognito authentication."""
 
+import base64
+import hashlib
 import json
 import logging
 import secrets
@@ -27,6 +29,8 @@ ID_TOKEN_COOKIE = "__Host-id_token"  # noqa: S105 — cookie name, not a secret
 REFRESH_TOKEN_COOKIE = "__Host-refresh_token"  # noqa: S105 — cookie name, not a secret
 STATE_COOKIE = "__Host-auth_state"
 REDIRECT_COOKIE = "__Host-auth_redirect"
+NONCE_COOKIE = "__Host-auth_nonce"
+PKCE_COOKIE = "__Host-auth_pkce_verifier"
 # Pre-v3 cookie names. Cleared alongside the prefixed ones so stale
 # credentials (a still-valid refresh token in particular) don't linger in
 # browsers after an upgrade.
@@ -64,7 +68,12 @@ def _generate_state() -> str:
     return secrets.token_urlsafe(32)
 
 
-def _authorize_url(state: str) -> str:
+def _pkce_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode()).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def _authorize_url(state: str, code_challenge: str, nonce: str) -> str:
     params = urllib.parse.urlencode(
         {
             "response_type": "code",
@@ -72,43 +81,61 @@ def _authorize_url(state: str) -> str:
             "redirect_uri": REDIRECT_URI,
             "scope": "openid",
             "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "nonce": nonce,
         }
     )
     return f"https://{COGNITO_DOMAIN}/oauth2/authorize?{params}"
 
 
-def _redirect_to_login(target: str = "/") -> dict:
-    """Redirect to Cognito login with CSRF state cookie.
+def _begin_login(target: str | None, *, clear_tokens: bool) -> dict:
+    """Redirect to Cognito authorize with fresh state/PKCE/nonce material.
 
     ``target`` (already validated by ``_safe_redirect_path``) is stored in a
     short-lived cookie so the callback can restore the originally requested
     page after sign-in.
     """
     state = _generate_state()
+    nonce = secrets.token_urlsafe(16)
+    verifier = secrets.token_urlsafe(64)  # 86 chars, within PKCE's 43-128
     cookie_headers = [
         {"key": "Set-Cookie", "value": _set_cookie(STATE_COOKIE, state, 300)},
-        {
-            "key": "Set-Cookie",
-            "value": _set_cookie(
-                REDIRECT_COOKIE, urllib.parse.quote(target, safe=""), 300
-            ),
-        },
+        {"key": "Set-Cookie", "value": _set_cookie(NONCE_COOKIE, nonce, 300)},
+        {"key": "Set-Cookie", "value": _set_cookie(PKCE_COOKIE, verifier, 300)},
     ]
-    return _redirect(_authorize_url(state), extra_headers={"set-cookie": cookie_headers})
+    if target is not None:
+        cookie_headers.append(
+            {
+                "key": "Set-Cookie",
+                "value": _set_cookie(
+                    REDIRECT_COOKIE, urllib.parse.quote(target, safe=""), 300
+                ),
+            }
+        )
+    if clear_tokens:
+        cookie_headers += [
+            {"key": "Set-Cookie", "value": _clear_cookie(ID_TOKEN_COOKIE)},
+            {"key": "Set-Cookie", "value": _clear_cookie(REFRESH_TOKEN_COOKIE)},
+        ]
+        cookie_headers += [
+            {"key": "Set-Cookie", "value": _clear_cookie(name)}
+            for name in _LEGACY_COOKIES
+        ]
+    return _redirect(
+        _authorize_url(state, _pkce_challenge(verifier), nonce),
+        extra_headers={"set-cookie": cookie_headers},
+    )
+
+
+def _redirect_to_login(target: str = "/") -> dict:
+    """Redirect to Cognito login with CSRF state cookie."""
+    return _begin_login(target, clear_tokens=False)
 
 
 def _redirect_to_login_clearing_cookies() -> dict:
     """Redirect to login and invalidate any existing auth cookies."""
-    state = _generate_state()
-    cookie_headers = [
-        {"key": "Set-Cookie", "value": _set_cookie(STATE_COOKIE, state, 300)},
-        {"key": "Set-Cookie", "value": _clear_cookie(ID_TOKEN_COOKIE)},
-        {"key": "Set-Cookie", "value": _clear_cookie(REFRESH_TOKEN_COOKIE)},
-    ]
-    cookie_headers += [
-        {"key": "Set-Cookie", "value": _clear_cookie(name)} for name in _LEGACY_COOKIES
-    ]
-    return _redirect(_authorize_url(state), extra_headers={"set-cookie": cookie_headers})
+    return _begin_login(None, clear_tokens=True)
 
 
 def _error_response(message: str) -> dict:
@@ -168,7 +195,7 @@ def handler(event, context):  # noqa: ARG001
 
     # Handle sign-out.
     if uri == SIGNOUT_PATH:
-        return _handle_signout()
+        return _handle_signout(cookies)
 
     # Check for valid id_token cookie.
     id_token = cookies.get(ID_TOKEN_COOKIE)
@@ -229,11 +256,32 @@ def _handle_callback(querystring: str, cookies: dict) -> dict:
 
     try:
         tokens = exchange_code(
-            code, REDIRECT_URI, COGNITO_DOMAIN, CLIENT_ID, CLIENT_SECRET_ARN
+            code,
+            REDIRECT_URI,
+            COGNITO_DOMAIN,
+            CLIENT_ID,
+            CLIENT_SECRET_ARN,
+            code_verifier=cookies.get(PKCE_COOKIE),
         )
     except Exception as e:
         logger.error("Token exchange failed: %s", e)
         return _redirect_to_login()
+
+    # Validate the received id_token before trusting it, and require the
+    # nonce claim to match the one minted at login (replay/injection guard).
+    from jwt_validator import validate_token
+
+    try:
+        claims = validate_token(tokens["id_token"], USER_POOL_ID, CLIENT_ID, REGION)
+    except Exception as e:
+        logger.warning("Post-exchange token validation failed: %s", e)
+        return _redirect_to_login_clearing_cookies()
+    expected_nonce = cookies.get(NONCE_COOKIE)
+    if not expected_nonce or not secrets.compare_digest(
+        claims.get("nonce") or "", expected_nonce
+    ):
+        logger.warning("Callback nonce mismatch")
+        return _redirect_to_login_clearing_cookies()
 
     cookie_headers = [
         {
@@ -247,6 +295,14 @@ def _handle_callback(querystring: str, cookies: dict) -> dict:
         {
             "key": "Set-Cookie",
             "value": _clear_cookie(REDIRECT_COOKIE),
+        },
+        {
+            "key": "Set-Cookie",
+            "value": _clear_cookie(NONCE_COOKIE),
+        },
+        {
+            "key": "Set-Cookie",
+            "value": _clear_cookie(PKCE_COOKIE),
         },
     ]
     if "refresh_token" in tokens:
@@ -267,12 +323,28 @@ def _handle_callback(querystring: str, cookies: dict) -> dict:
     return _redirect(target, extra_headers={"set-cookie": cookie_headers})
 
 
-def _handle_signout() -> dict:
+def _handle_signout(cookies: dict) -> dict:
+    # Revoke the refresh token server-side so it can't be replayed after
+    # sign-out. Best-effort: clearing cookies must succeed regardless.
+    refresh_token = cookies.get(REFRESH_TOKEN_COOKIE)
+    if refresh_token:
+        from cognito_client import revoke_token
+
+        try:
+            if not revoke_token(
+                refresh_token, COGNITO_DOMAIN, CLIENT_ID, CLIENT_SECRET_ARN
+            ):
+                logger.warning("Refresh token revocation returned failure")
+        except Exception as e:
+            logger.warning("Refresh token revocation failed: %s", e)
+
     cookie_headers = [
         {"key": "Set-Cookie", "value": _clear_cookie(ID_TOKEN_COOKIE)},
         {"key": "Set-Cookie", "value": _clear_cookie(REFRESH_TOKEN_COOKIE)},
         {"key": "Set-Cookie", "value": _clear_cookie(STATE_COOKIE)},
         {"key": "Set-Cookie", "value": _clear_cookie(REDIRECT_COOKIE)},
+        {"key": "Set-Cookie", "value": _clear_cookie(NONCE_COOKIE)},
+        {"key": "Set-Cookie", "value": _clear_cookie(PKCE_COOKIE)},
     ]
     cookie_headers += [
         {"key": "Set-Cookie", "value": _clear_cookie(name)} for name in _LEGACY_COOKIES
@@ -307,4 +379,15 @@ def _try_refresh(refresh_token: str, uri: str, querystring: str) -> dict:
             "value": _set_cookie(ID_TOKEN_COOKIE, tokens["id_token"], 3600),
         },
     ]
+    # Cognito rotates refresh tokens when the app client has rotation
+    # enabled — persist the new one or the session dies at next refresh.
+    if tokens.get("refresh_token"):
+        cookie_headers.append(
+            {
+                "key": "Set-Cookie",
+                "value": _set_cookie(
+                    REFRESH_TOKEN_COOKIE, tokens["refresh_token"], 2592000
+                ),
+            }
+        )
     return _redirect(target, extra_headers={"set-cookie": cookie_headers})

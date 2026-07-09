@@ -10,10 +10,14 @@ http = urllib3.PoolManager()
 
 # Module-level cache for JWKS keys (persists across warm Lambda invocations).
 # TTL is short so Cognito key rotation is picked up quickly. Independently, the
-# cache is force-refreshed on a kid miss (new key published mid-TTL).
+# cache is force-refreshed on a kid miss (new key published mid-TTL) — but at
+# most once per _FORCE_REFRESH_MIN_INTERVAL, so attacker-supplied tokens with
+# garbage kids can't turn every request into a JWKS fetch.
 _jwks_cache: dict = {}
 _jwks_cache_time: float = 0.0
 _JWKS_CACHE_TTL = 600  # 10 minutes
+_last_forced_refresh: float = 0.0
+_FORCE_REFRESH_MIN_INTERVAL = 30  # seconds
 
 
 def _fetch_jwks(user_pool_id: str, region: str) -> dict:
@@ -28,13 +32,15 @@ def _fetch_jwks(user_pool_id: str, region: str) -> dict:
 
 
 def _get_jwks(user_pool_id: str, region: str, *, force: bool = False) -> dict:
-    global _jwks_cache, _jwks_cache_time
+    global _jwks_cache, _jwks_cache_time, _last_forced_refresh
     now = time.time()
-    if (
-        not force
-        and _jwks_cache
-        and (now - _jwks_cache_time) < _JWKS_CACHE_TTL
-    ):
+    if force:
+        # Rate-limit forced refreshes; return the (possibly stale) cache in
+        # between. Legitimate key rotation tolerates a short delay.
+        if _jwks_cache and (now - _last_forced_refresh) < _FORCE_REFRESH_MIN_INTERVAL:
+            return _jwks_cache
+        _last_forced_refresh = now
+    elif _jwks_cache and (now - _jwks_cache_time) < _JWKS_CACHE_TTL:
         return _jwks_cache
     _jwks_cache = _fetch_jwks(user_pool_id, region)
     _jwks_cache_time = now

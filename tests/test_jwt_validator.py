@@ -29,6 +29,7 @@ def jwt_mod(tmp_path, monkeypatch):
     # Ensure a clean cache between tests.
     mod._jwks_cache = {}
     mod._jwks_cache_time = 0.0
+    mod._last_forced_refresh = 0.0
     yield mod
     for name in ("handler", "jwt_validator", "cognito_client"):
         sys.modules.pop(name, None)
@@ -145,3 +146,36 @@ def test_non_rs256_alg_rejected(jwt_mod, monkeypatch):
     monkeypatch.setattr(jwt_mod, "_fetch_jwks", lambda *_a, **_k: {"keys": []})
     with pytest.raises(jwt.InvalidTokenError, match="algorithm"):
         jwt_mod.validate_token(hs_token, "pool", "client", "us-east-1")
+
+
+def test_forced_jwks_refresh_is_rate_limited(jwt_mod, monkeypatch):
+    """Unknown-kid tokens must not trigger a JWKS fetch on every request."""
+    key, _, jwk = _make_rsa_jwk(kid="known-kid")
+    pool, region, client = "us-east-1_Test", "us-east-1", "client-1"
+    unknown = _sign(
+        key,
+        {
+            "iss": f"https://cognito-idp.{region}.amazonaws.com/{pool}",
+            "aud": client,
+            "exp": int(time.time()) + 60,
+        },
+        kid="attacker-kid",
+    )
+
+    calls = {"n": 0}
+
+    def fake_fetch(*_a, **_k):
+        calls["n"] += 1
+        return {"keys": [jwk]}  # never contains attacker-kid
+
+    monkeypatch.setattr(jwt_mod, "_fetch_jwks", fake_fetch)
+
+    with pytest.raises(jwt.InvalidTokenError, match="not found"):
+        jwt_mod.validate_token(unknown, pool, client, region)
+    assert calls["n"] == 2  # initial + one forced refresh
+
+    # A second garbage-kid token inside the rate-limit window must be
+    # rejected from cache without another fetch.
+    with pytest.raises(jwt.InvalidTokenError, match="not found"):
+        jwt_mod.validate_token(unknown, pool, client, region)
+    assert calls["n"] == 2
