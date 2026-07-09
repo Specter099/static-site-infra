@@ -99,6 +99,11 @@ def test_parse_cookies_handles_missing_cookie_header(auth_module):
         ("http://evil.com/x", "", "/"),  # absolute URL
         ("", "", "/"),  # empty
         ("javascript:alert(1)", "", "/"),  # scheme smuggle
+        ("/\\evil.com", "", "/"),  # browsers may normalize \ to /
+        ("/\\\\evil.com", "", "/"),  # double backslash variant
+        ("/a\\b", "", "/"),  # embedded backslash
+        ("/line\rbreak", "", "/"),  # control chars (header injection)
+        ("/line\nbreak", "", "/"),
     ],
 )
 def test_safe_redirect_path(auth_module, uri, qs, expected):
@@ -113,12 +118,47 @@ def test_handler_no_token_redirects_to_login(auth_module):
     assert resp["status"] == "302"
     loc = resp["headers"]["location"][0]["value"]
     assert loc.startswith("https://auth.example.com/oauth2/authorize?")
-    # Sets an auth_state cookie for CSRF protection.
+    # Sets a __Host- state cookie for CSRF protection.
     set_cookie = resp["headers"]["set-cookie"][0]["value"]
-    assert "auth_state=" in set_cookie
+    assert set_cookie.startswith("__Host-auth_state=")
     assert "HttpOnly" in set_cookie
     assert "Secure" in set_cookie
     assert "SameSite=Lax" in set_cookie
+
+
+def test_handler_preserves_deep_link_through_login(auth_module, monkeypatch):
+    """The requested page survives the login round trip via the redirect cookie."""
+    resp = auth_module.handler(_event("/reports/q2", querystring="id=7"), None)
+    cookies = {c["value"].split("=", 1)[0]: c["value"] for c in resp["headers"]["set-cookie"]}
+    assert "__Host-auth_redirect" in cookies
+    assert "%2Freports%2Fq2%3Fid%3D7" in cookies["__Host-auth_redirect"]
+
+    # Simulate the callback with that cookie present.
+    monkeypatch.setattr(
+        "cognito_client.exchange_code",
+        lambda *_a, **_k: {"id_token": "id"},
+    )
+    event = _event(
+        "/_callback",
+        cookies={
+            "__Host-auth_state": "s",
+            "__Host-auth_redirect": "%2Freports%2Fq2%3Fid%3D7",
+        },
+        querystring="code=abc&state=s",
+    )
+    cb = auth_module.handler(event, None)
+    assert cb["status"] == "302"
+    assert cb["headers"]["location"][0]["value"] == "/reports/q2?id=7"
+
+
+def test_callback_error_param_shows_error_page(auth_module):
+    """error= from Cognito must not loop back to login — show a static page."""
+    event = _event("/_callback", querystring="error=access_denied&error_description=x")
+    resp = auth_module.handler(event, None)
+    assert resp["status"] == "403"
+    assert "location" not in resp["headers"]
+    # Never reflect IdP-supplied values into the body.
+    assert "access_denied" not in resp["body"]
 
 
 def test_handler_valid_token_passes_through(auth_module, monkeypatch):
@@ -126,7 +166,7 @@ def test_handler_valid_token_passes_through(auth_module, monkeypatch):
         "jwt_validator.validate_token",
         lambda *_a, **_k: {"sub": "user-1"},
     )
-    event = _event("/secret", cookies={"id_token": "valid.token.here"})
+    event = _event("/secret", cookies={"__Host-id_token": "valid.token.here"})
     resp = auth_module.handler(event, None)
     # Passthrough returns the original request dict, not a redirect.
     assert "status" not in resp
@@ -141,7 +181,7 @@ def test_handler_expired_token_without_refresh_redirects_to_login(
 
     monkeypatch.setattr("jwt_validator.validate_token", raise_expired)
     resp = auth_module.handler(
-        _event("/secret", cookies={"id_token": "expired"}), None
+        _event("/secret", cookies={"__Host-id_token": "expired"}), None
     )
     assert resp["status"] == "302"
     assert "/oauth2/authorize" in resp["headers"]["location"][0]["value"]
@@ -161,7 +201,7 @@ def test_handler_expired_token_with_refresh_token_attempts_refresh(
     resp = auth_module.handler(
         _event(
             "/app",
-            cookies={"id_token": "expired", "refresh_token": "r"},
+            cookies={"__Host-id_token": "expired", "__Host-refresh_token": "r"},
             querystring="q=1",
         ),
         None,
@@ -170,7 +210,7 @@ def test_handler_expired_token_with_refresh_token_attempts_refresh(
     # Redirects back to the original path, not to /
     assert resp["headers"]["location"][0]["value"] == "/app?q=1"
     cookies = [c["value"] for c in resp["headers"]["set-cookie"]]
-    assert any(c.startswith("id_token=new-token") for c in cookies)
+    assert any(c.startswith("__Host-id_token=new-token") for c in cookies)
 
 
 def test_handler_invalid_token_fails_closed(auth_module, monkeypatch):
@@ -191,22 +231,27 @@ def test_handler_invalid_token_fails_closed(auth_module, monkeypatch):
     resp = auth_module.handler(
         _event(
             "/secret",
-            cookies={"id_token": "tampered", "refresh_token": "should-not-be-used"},
+            cookies={
+                "__Host-id_token": "tampered",
+                "__Host-refresh_token": "should-not-be-used",
+            },
         ),
         None,
     )
     assert called["refresh"] is False
     assert resp["status"] == "302"
-    # Clears id_token and refresh_token.
+    # Clears the token cookies (and the pre-v3 legacy names).
     values = [c["value"] for c in resp["headers"]["set-cookie"]]
-    assert any("id_token=;" in v for v in values)
-    assert any("refresh_token=;" in v for v in values)
+    assert any(v.startswith("__Host-id_token=;") for v in values)
+    assert any(v.startswith("__Host-refresh_token=;") for v in values)
+    assert any(v.startswith("id_token=;") for v in values)
+    assert any(v.startswith("refresh_token=;") for v in values)
 
 
 def test_callback_state_mismatch_redirects_to_login(auth_module):
     event = _event(
         "/_callback",
-        cookies={"auth_state": "expected-state"},
+        cookies={"__Host-auth_state": "expected-state"},
         querystring="code=abc&state=different-state",
     )
     resp = auth_module.handler(event, None)
@@ -228,16 +273,16 @@ def test_callback_success_sets_tokens_and_clears_state(auth_module, monkeypatch)
     )
     event = _event(
         "/_callback",
-        cookies={"auth_state": "s"},
+        cookies={"__Host-auth_state": "s"},
         querystring="code=abc&state=s",
     )
     resp = auth_module.handler(event, None)
     assert resp["status"] == "302"
     assert resp["headers"]["location"][0]["value"] == "/"
     cookies = [c["value"] for c in resp["headers"]["set-cookie"]]
-    assert any(c.startswith("id_token=id") for c in cookies)
-    assert any(c.startswith("refresh_token=rt") for c in cookies)
-    assert any("auth_state=;" in c for c in cookies)
+    assert any(c.startswith("__Host-id_token=id") for c in cookies)
+    assert any(c.startswith("__Host-refresh_token=rt") for c in cookies)
+    assert any(c.startswith("__Host-auth_state=;") for c in cookies)
 
 
 def test_signout_clears_cookies_and_redirects_to_cognito(auth_module):
@@ -247,5 +292,8 @@ def test_signout_clears_cookies_and_redirects_to_cognito(auth_module):
     assert loc.startswith("https://auth.example.com/logout?")
     assert "client_id=test-client" in loc
     cookie_values = [c["value"] for c in resp["headers"]["set-cookie"]]
-    assert any("id_token=;" in v for v in cookie_values)
-    assert any("refresh_token=;" in v for v in cookie_values)
+    assert any(v.startswith("__Host-id_token=;") for v in cookie_values)
+    assert any(v.startswith("__Host-refresh_token=;") for v in cookie_values)
+    # Legacy (pre-v3) cookie names are cleared too.
+    assert any(v.startswith("id_token=;") for v in cookie_values)
+    assert any(v.startswith("refresh_token=;") for v in cookie_values)

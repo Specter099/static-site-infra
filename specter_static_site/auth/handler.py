@@ -21,6 +21,17 @@ CALLBACK_PATH = _config["callback_path"]
 SIGNOUT_PATH = _config["signout_path"]
 REGION = _config["region"]
 
+# __Host- prefix: browsers enforce Secure, no Domain, Path=/ — no subdomain
+# can plant or shadow these cookies.
+ID_TOKEN_COOKIE = "__Host-id_token"  # noqa: S105 — cookie name, not a secret
+REFRESH_TOKEN_COOKIE = "__Host-refresh_token"  # noqa: S105 — cookie name, not a secret
+STATE_COOKIE = "__Host-auth_state"
+REDIRECT_COOKIE = "__Host-auth_redirect"
+# Pre-v3 cookie names. Cleared alongside the prefixed ones so stale
+# credentials (a still-valid refresh token in particular) don't linger in
+# browsers after an upgrade.
+_LEGACY_COOKIES = ("id_token", "refresh_token", "auth_state")
+
 
 def _parse_cookies(headers: dict) -> dict:
     cookies = {}
@@ -66,35 +77,69 @@ def _authorize_url(state: str) -> str:
     return f"https://{COGNITO_DOMAIN}/oauth2/authorize?{params}"
 
 
-def _redirect_to_login() -> dict:
-    """Redirect to Cognito login with CSRF state cookie."""
+def _redirect_to_login(target: str = "/") -> dict:
+    """Redirect to Cognito login with CSRF state cookie.
+
+    ``target`` (already validated by ``_safe_redirect_path``) is stored in a
+    short-lived cookie so the callback can restore the originally requested
+    page after sign-in.
+    """
     state = _generate_state()
-    state_cookie = {
-        "set-cookie": [
-            {
-                "key": "Set-Cookie",
-                "value": _set_cookie("auth_state", state, 300),
-            }
-        ]
-    }
-    return _redirect(_authorize_url(state), extra_headers=state_cookie)
+    cookie_headers = [
+        {"key": "Set-Cookie", "value": _set_cookie(STATE_COOKIE, state, 300)},
+        {
+            "key": "Set-Cookie",
+            "value": _set_cookie(
+                REDIRECT_COOKIE, urllib.parse.quote(target, safe=""), 300
+            ),
+        },
+    ]
+    return _redirect(_authorize_url(state), extra_headers={"set-cookie": cookie_headers})
 
 
 def _redirect_to_login_clearing_cookies() -> dict:
     """Redirect to login and invalidate any existing auth cookies."""
     state = _generate_state()
     cookie_headers = [
-        {"key": "Set-Cookie", "value": _set_cookie("auth_state", state, 300)},
-        {"key": "Set-Cookie", "value": _clear_cookie("id_token")},
-        {"key": "Set-Cookie", "value": _clear_cookie("refresh_token")},
+        {"key": "Set-Cookie", "value": _set_cookie(STATE_COOKIE, state, 300)},
+        {"key": "Set-Cookie", "value": _clear_cookie(ID_TOKEN_COOKIE)},
+        {"key": "Set-Cookie", "value": _clear_cookie(REFRESH_TOKEN_COOKIE)},
+    ]
+    cookie_headers += [
+        {"key": "Set-Cookie", "value": _clear_cookie(name)} for name in _LEGACY_COOKIES
     ]
     return _redirect(_authorize_url(state), extra_headers={"set-cookie": cookie_headers})
+
+
+def _error_response(message: str) -> dict:
+    """Static error page. ``message`` must be a literal — never reflect
+    request or IdP-supplied values into the body."""
+    return {
+        "status": "403",
+        "statusDescription": "Forbidden",
+        "headers": {
+            "content-type": [
+                {"key": "Content-Type", "value": "text/html; charset=utf-8"}
+            ],
+            "cache-control": [{"key": "Cache-Control", "value": "no-store"}],
+        },
+        "body": (
+            "<html><body><h1>Sign-in failed</h1>"
+            f"<p>{message}</p>"
+            '<p><a href="/">Try again</a></p></body></html>'
+        ),
+    }
 
 
 def _safe_redirect_path(uri: str, qs: str) -> str:
     """Validate and return a safe relative redirect path."""
     # Only allow relative paths starting with /
     if not uri or not uri.startswith("/") or uri.startswith("//"):
+        return "/"
+    # Backslashes (some browsers normalize \ to / in Location, turning
+    # /\evil.com into protocol-relative //evil.com) and control characters
+    # are never legitimate here.
+    if "\\" in uri or any(ord(c) < 0x20 for c in uri):
         return "/"
     # Strip any scheme or authority that might be smuggled in
     parsed = urllib.parse.urlparse(uri)
@@ -113,7 +158,9 @@ def handler(event, context):  # noqa: ARG001
     querystring = request.get("querystring", "")
     cookies = _parse_cookies(headers)
 
-    logger.info("uri=%s cookies=%s", uri, list(cookies.keys()))
+    # Debug level: routine per-request URI logging otherwise accumulates in
+    # unmanaged edge-region log groups (see README operational caveats).
+    logger.debug("uri=%s cookies=%s", uri, list(cookies.keys()))
 
     # Handle callback from Cognito.
     if uri == CALLBACK_PATH:
@@ -124,7 +171,7 @@ def handler(event, context):  # noqa: ARG001
         return _handle_signout()
 
     # Check for valid id_token cookie.
-    id_token = cookies.get("id_token")
+    id_token = cookies.get(ID_TOKEN_COOKIE)
     if id_token:
         import jwt as _jwt
         from jwt_validator import validate_token
@@ -134,21 +181,33 @@ def handler(event, context):  # noqa: ARG001
             return request  # Valid token — pass through.
         except _jwt.ExpiredSignatureError:
             # Only expired tokens are eligible for a refresh attempt.
-            refresh_token = cookies.get("refresh_token")
+            refresh_token = cookies.get(REFRESH_TOKEN_COOKIE)
             if refresh_token:
                 return _try_refresh(refresh_token, uri, querystring)
-            return _redirect_to_login()
+            return _redirect_to_login(_safe_redirect_path(uri, querystring))
         except _jwt.InvalidTokenError as e:
             # Tampered, malformed, or wrong-audience token — fail closed.
             logger.warning("Invalid id_token, clearing cookies: %s", e)
             return _redirect_to_login_clearing_cookies()
 
-    # No token — redirect to login.
-    return _redirect_to_login()
+    # No token — redirect to login, preserving the requested page.
+    return _redirect_to_login(_safe_redirect_path(uri, querystring))
 
 
 def _handle_callback(querystring: str, cookies: dict) -> dict:
     params = urllib.parse.parse_qs(querystring)
+
+    # The IdP reported an error (e.g. access_denied when the user cancels).
+    # Redirecting to "/" would immediately bounce back to the login page —
+    # show a static error instead. Log the details; never reflect them.
+    if params.get("error"):
+        logger.warning(
+            "Cognito callback error=%s description=%s",
+            params.get("error", [None])[0],
+            params.get("error_description", [None])[0],
+        )
+        return _error_response("The sign-in attempt was cancelled or refused.")
+
     code = params.get("code", [None])[0]
     state = params.get("state", [None])[0]
 
@@ -157,7 +216,7 @@ def _handle_callback(querystring: str, cookies: dict) -> dict:
 
     # Validate state parameter against cookie to prevent CSRF. Use constant-time
     # comparison and do not log the state values themselves.
-    expected_state = cookies.get("auth_state")
+    expected_state = cookies.get(STATE_COOKIE)
     if (
         not state
         or not expected_state
@@ -179,29 +238,44 @@ def _handle_callback(querystring: str, cookies: dict) -> dict:
     cookie_headers = [
         {
             "key": "Set-Cookie",
-            "value": _set_cookie("id_token", tokens["id_token"], 3600),
+            "value": _set_cookie(ID_TOKEN_COOKIE, tokens["id_token"], 3600),
         },
         {
             "key": "Set-Cookie",
-            "value": _clear_cookie("auth_state"),
+            "value": _clear_cookie(STATE_COOKIE),
+        },
+        {
+            "key": "Set-Cookie",
+            "value": _clear_cookie(REDIRECT_COOKIE),
         },
     ]
     if "refresh_token" in tokens:
         cookie_headers.append(
             {
                 "key": "Set-Cookie",
-                "value": _set_cookie("refresh_token", tokens["refresh_token"], 2592000),
+                "value": _set_cookie(
+                    REFRESH_TOKEN_COOKIE, tokens["refresh_token"], 2592000
+                ),
             }
         )
 
-    return _redirect("/", extra_headers={"set-cookie": cookie_headers})
+    # Restore the page requested before login. The cookie is server-set and
+    # __Host--protected, but re-validate anyway.
+    raw_target = urllib.parse.unquote(cookies.get(REDIRECT_COOKIE, "/"))
+    path, _, qs = raw_target.partition("?")
+    target = _safe_redirect_path(path, qs)
+    return _redirect(target, extra_headers={"set-cookie": cookie_headers})
 
 
 def _handle_signout() -> dict:
     cookie_headers = [
-        {"key": "Set-Cookie", "value": _clear_cookie("id_token")},
-        {"key": "Set-Cookie", "value": _clear_cookie("refresh_token")},
-        {"key": "Set-Cookie", "value": _clear_cookie("auth_state")},
+        {"key": "Set-Cookie", "value": _clear_cookie(ID_TOKEN_COOKIE)},
+        {"key": "Set-Cookie", "value": _clear_cookie(REFRESH_TOKEN_COOKIE)},
+        {"key": "Set-Cookie", "value": _clear_cookie(STATE_COOKIE)},
+        {"key": "Set-Cookie", "value": _clear_cookie(REDIRECT_COOKIE)},
+    ]
+    cookie_headers += [
+        {"key": "Set-Cookie", "value": _clear_cookie(name)} for name in _LEGACY_COOKIES
     ]
     logout_uri = REDIRECT_URI.replace("/_callback", "/")
     params = urllib.parse.urlencode(
@@ -230,7 +304,7 @@ def _try_refresh(refresh_token: str, uri: str, querystring: str) -> dict:
     cookie_headers = [
         {
             "key": "Set-Cookie",
-            "value": _set_cookie("id_token", tokens["id_token"], 3600),
+            "value": _set_cookie(ID_TOKEN_COOKIE, tokens["id_token"], 3600),
         },
     ]
     return _redirect(target, extra_headers={"set-cookie": cookie_headers})

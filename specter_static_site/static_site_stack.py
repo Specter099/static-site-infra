@@ -393,7 +393,11 @@ class StaticSiteStack(Stack):
             threshold=10,
             evaluation_periods=2,
             comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            alarm_description="CloudFront 4xx error rate exceeded 10%",
+            alarm_description=(
+                "CloudFront 4xx error rate exceeded 10%. Note: 404s are "
+                "rewritten to 200 /index.html for SPA routing, so this metric "
+                "mostly reflects 403s (auth/OAC failures), not broken links."
+            ),
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
         high_4xx_alarm.add_alarm_action(alarm_action)
