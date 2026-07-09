@@ -19,6 +19,10 @@ dev = [
     "ruff~=0.6",
     "pip-audit~=2.7",
     "boto3~=1.34",
+    # Test-time deps for exercising the Lambda@Edge handler code directly.
+    "PyJWT>=2.8.0",
+    "cryptography>=41.0.0",
+    "urllib3>=2.0.0",
 ]
 
 [tool.ruff]
