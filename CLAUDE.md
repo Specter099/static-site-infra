@@ -10,8 +10,15 @@ Reusable AWS CDK (Python) construct (`StaticSiteStack`) for hosting static sites
 
 ```
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -r requirements-lock.txt && pip install -e . --no-deps
 ```
+
+Dependency locking: `requirements-lock.txt` (CI/dev environment) and
+`specter_static_site/auth/requirements.txt` (Lambda bundle, hash-pinned) are
+`pip-compile` outputs — edit the corresponding `.in` file and recompile
+(`pip-compile requirements-lock.in -o requirements-lock.txt`;
+`pip-compile --generate-hashes specter_static_site/auth/requirements.in
+--output-file specter_static_site/auth/requirements.txt`).
 
 ## Common Commands
 
@@ -71,6 +78,8 @@ tests/
 | `alarm_topic_arn` / `alarm_email` | Alarm notifications: import an existing SNS topic, or auto-create one (optionally with an email subscription) |
 | `skip_deployment` | Skip S3 asset deployment (for CI/CD-managed deploys) |
 | `deploy_role_arns` | IAM role ARNs granted read/write on the site bucket |
+| `removal_policy` | Site bucket removal policy; defaults to RETAIN (pass DESTROY for dev/test) |
+| `bucket_name_prefix` | Overrides the domain slug in bucket names (S3's 63-char limit) |
 
 ## Testing
 

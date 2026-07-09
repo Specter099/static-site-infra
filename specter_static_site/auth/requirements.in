@@ -1,0 +1,6 @@
+# Top-level runtime deps for the Lambda@Edge auth handler.
+# Compiled to requirements.txt with hashes: make lock-auth (see CLAUDE.md).
+# boto3/botocore are intentionally absent — the Lambda managed runtime provides them.
+PyJWT>=2.8.0
+cryptography>=41.0.0
+urllib3>=2.0.0

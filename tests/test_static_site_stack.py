@@ -138,6 +138,107 @@ def test_synth_with_deploy_role_arns(tmp_path):
     assert assembly is not None
 
 
+def test_deploy_role_arns_same_name_different_accounts(tmp_path):
+    """Same role name in two accounts must not collide on construct IDs."""
+    _, assembly = _synth(
+        tmp_path,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+        deploy_role_arns=[
+            "arn:aws:iam::111111111111:role/deploy",
+            "arn:aws:iam::222222222222:role/deploy",
+        ],
+    )
+    assert assembly is not None
+
+
+def test_non_us_east_1_with_cert_creation_raises(tmp_path):
+    app = cdk.App()
+    with pytest.raises(ValueError, match="us-east-1"):
+        StaticSiteStack(
+            app,
+            "TestStack",
+            domain_name="example.com",
+            dist_path=make_dist(tmp_path),
+            hosted_zone_id="Z1234567890",
+            env=cdk.Environment(account="123456789012", region="eu-west-1"),
+        )
+
+
+def test_non_us_east_1_with_cognito_raises(tmp_path):
+    app = cdk.App()
+    with pytest.raises(ValueError, match="us-east-1"):
+        StaticSiteStack(
+            app,
+            "TestStack",
+            domain_name="example.com",
+            dist_path=make_dist(tmp_path),
+            certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+            cognito_user_pool_id="us-east-1_TestPool",
+            cognito_client_id="c",
+            cognito_client_secret_arn=_TEST_SECRET_ARN,
+            cognito_domain="d.auth.us-east-1.amazoncognito.com",
+            env=cdk.Environment(account="123456789012", region="eu-west-1"),
+        )
+
+
+def test_env_agnostic_cert_creation_warns_not_raises(tmp_path):
+    stack, _ = _synth(tmp_path, hosted_zone_id="Z1234567890")
+    assertions.Annotations.from_stack(stack).has_warning(
+        "*",
+        assertions.Match.string_like_regexp(".*us-east-1.*"),
+    )
+
+
+def test_bucket_name_overflow_raises(tmp_path):
+    app = cdk.App()
+    long_domain = "a-very-long-marketing-site.example-company.com"
+    with pytest.raises(ValueError, match="bucket_name_prefix"):
+        StaticSiteStack(
+            app,
+            "TestStack",
+            domain_name=long_domain,
+            dist_path=make_dist(tmp_path),
+            certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+        )
+
+
+def test_bucket_name_prefix_escape_hatch(tmp_path):
+    stack, _ = _synth(
+        tmp_path,
+        domain_name="a-very-long-marketing-site.example-company.com",
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+        bucket_name_prefix="mktg-site",
+        env=cdk.Environment(account="123456789012", region="us-east-1"),
+    )
+    template = assertions.Template.from_stack(stack)
+    template.has_resource_properties(
+        "AWS::S3::Bucket",
+        {"BucketName": "mktg-site-site-123456789012-us-east-1-an"},
+    )
+
+
+def test_site_bucket_retained_by_default(tmp_path):
+    stack, _ = _synth(
+        tmp_path,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+    )
+    template = assertions.Template.from_stack(stack)
+    for bucket in template.find_resources("AWS::S3::Bucket").values():
+        assert bucket["DeletionPolicy"] == "Retain"
+    # No auto-delete custom resource when the bucket is retained.
+    assert not template.find_resources("Custom::S3AutoDeleteObjects")
+
+
+def test_site_bucket_destroy_opt_in(tmp_path):
+    stack, _ = _synth(
+        tmp_path,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+        removal_policy=cdk.RemovalPolicy.DESTROY,
+    )
+    template = assertions.Template.from_stack(stack)
+    assert template.find_resources("Custom::S3AutoDeleteObjects")
+
+
 def test_synth_alarms_present(tmp_path):
     stack, _ = _synth(
         tmp_path,

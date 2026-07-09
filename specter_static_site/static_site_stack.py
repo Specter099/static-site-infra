@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import shutil
@@ -5,11 +6,13 @@ import tempfile
 from pathlib import Path
 
 from aws_cdk import (  # noqa: I001
+    Annotations,
     BundlingOptions,
     CfnOutput,
     Duration,
     RemovalPolicy,
     Stack,
+    Token,
     aws_certificatemanager as acm,
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
@@ -57,6 +60,8 @@ class StaticSiteStack(Stack):
         cognito_region: str | None = None,
         alarm_topic_arn: str | None = None,
         alarm_email: str | None = None,
+        removal_policy: RemovalPolicy = RemovalPolicy.RETAIN,
+        bucket_name_prefix: str | None = None,
         skip_deployment: bool = False,
         exclude_patterns: list[str] | None = None,
         deployment_memory_limit: int = 512,
@@ -90,11 +95,46 @@ class StaticSiteStack(Stack):
                 f"Got {cognito_client_secret_arn!r}."
             )
 
+        # Lambda@Edge functions and CloudFront-attached ACM certificates only
+        # work in us-east-1. Fail at synth instead of deep into a deploy.
+        needs_us_east_1 = enable_auth or (
+            certificate_arn is None and hosted_zone_id is not None
+        )
+        if needs_us_east_1:
+            if Token.is_unresolved(self.region):
+                Annotations.of(self).add_warning_v2(
+                    "specter-static-site:region-unresolved",
+                    "Stack region is environment-agnostic and cannot be verified "
+                    "to be us-east-1, which Lambda@Edge and CloudFront-attached "
+                    "ACM certificates require. Set env=cdk.Environment(region="
+                    "'us-east-1', ...).",
+                )
+            elif self.region != "us-east-1":
+                raise ValueError(
+                    "Lambda@Edge and CloudFront-attached ACM certificates require "
+                    f"the stack to be in us-east-1, got {self.region!r}. Set "
+                    "env=cdk.Environment(region='us-east-1', ...)."
+                )
+
         # CloudWatch dashboard names allow only alphanumerics, dashes, and underscores.
         resolved_dashboard_name = (dashboard_name or domain_name).replace(".", "-")
 
         # Sanitize domain name for use in bucket names (replace dots with hyphens).
-        domain_slug = domain_name.replace(".", "-")
+        domain_slug = bucket_name_prefix or domain_name.lower().replace(".", "-")
+
+        # S3 bucket names are capped at 63 chars. account/region may be
+        # unresolved tokens at synth, so validate against worst-case lengths
+        # (12-digit account, longest region name) using the longest name
+        # ("-s3-logs-" infix) as the budget.
+        account_len = 12 if Token.is_unresolved(self.account) else len(self.account)
+        region_len = 14 if Token.is_unresolved(self.region) else len(self.region)
+        overhead = len("-s3-logs-") + account_len + 1 + region_len + len("-an")
+        if len(domain_slug) + overhead > 63:
+            raise ValueError(
+                f"Bucket names derived from {domain_slug!r} can exceed S3's "
+                "63-character limit. Pass bucket_name_prefix with a shorter "
+                f"value (at most {63 - overhead} characters)."
+            )
 
         # S3 access logs bucket
         s3_access_logs_bucket = s3.Bucket(
@@ -121,8 +161,10 @@ class StaticSiteStack(Stack):
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             encryption=s3.BucketEncryption.S3_MANAGED,
             enforce_ssl=True,
-            removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
+            # RETAIN by default: a stack delete must not wipe a production
+            # site. Pass RemovalPolicy.DESTROY for dev/test stacks.
+            removal_policy=removal_policy,
+            auto_delete_objects=removal_policy == RemovalPolicy.DESTROY,
             server_access_logs_bucket=s3_access_logs_bucket,
             versioned=True,
             lifecycle_rules=[
@@ -134,10 +176,12 @@ class StaticSiteStack(Stack):
         )
 
         # Grant external roles read/write access to the site bucket (e.g. CI/CD pipelines).
-        for role_arn in deploy_role_arns or []:
+        # Construct IDs hash the full ARN — role names alone can collide across
+        # accounts or IAM paths.
+        for i, role_arn in enumerate(deploy_role_arns or []):
             role = iam.Role.from_role_arn(
                 self,
-                f"DeployRole{role_arn.split('/')[-1]}",
+                f"DeployRole{i}{hashlib.sha256(role_arn.encode()).hexdigest()[:8]}",
                 role_arn,
             )
             site_bucket.grant_read_write(role)
@@ -195,6 +239,10 @@ class StaticSiteStack(Stack):
             try:
                 for src in _AUTH_DIR.glob("*.py"):
                     shutil.copy2(src, staging / src.name)
+                # Hash-pinned runtime deps (see auth/requirements.in).
+                shutil.copy2(
+                    _AUTH_DIR / "requirements.txt", staging / "requirements.txt"
+                )
                 (staging / "config.json").write_text(
                     json.dumps(
                         {
@@ -230,7 +278,8 @@ class StaticSiteStack(Stack):
                             command=[
                                 "bash",
                                 "-c",
-                                "pip install PyJWT cryptography urllib3"
+                                "pip install -r /asset-input/requirements.txt"
+                                " --require-hashes"
                                 " --platform manylinux2014_x86_64"
                                 " --implementation cp"
                                 " --python-version 3.12"

@@ -1,0 +1,14 @@
+# CI lockfile input — pins the full test/lint environment for reproducible CI.
+# Compile: .venv/bin/pip-compile requirements-lock.in -o requirements-lock.txt
+# Keep ranges in sync with pyproject.toml; Dependabot refreshes the output.
+aws-cdk-lib>=2.244,<2.255
+constructs~=10.6.0
+cdk-nag>=2.37.55,<2.39.0
+pytest~=9.0.2
+ruff~=0.6
+pip-audit~=2.7
+boto3~=1.34
+# Test-time deps for exercising the Lambda@Edge handler code directly.
+PyJWT>=2.8.0
+cryptography>=41.0.0
+urllib3>=2.0.0
