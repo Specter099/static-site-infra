@@ -67,7 +67,8 @@ tests/
 | `certificate_arn` | Existing ACM cert ARN (or omit with `hosted_zone_id` to auto-create) |
 | `hosted_zone_id` | Route 53 zone for DNS validation (required if no `certificate_arn`) |
 | `web_acl_id` | WAF Web ACL ARN to attach to CloudFront |
-| `cognito_*` | All four required together to enable Lambda@Edge auth |
+| `cognito_*` | All four required together to enable Lambda@Edge auth. `cognito_client_secret_arn` is a full Secrets Manager ARN in us-east-1; the secret value is fetched at Lambda cold start, never baked into the package |
+| `alarm_topic_arn` / `alarm_email` | Alarm notifications: import an existing SNS topic, or auto-create one (optionally with an email subscription) |
 | `skip_deployment` | Skip S3 asset deployment (for CI/CD-managed deploys) |
 | `deploy_role_arns` | IAM role ARNs granted read/write on the site bucket |
 

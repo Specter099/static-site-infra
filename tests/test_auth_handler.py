@@ -17,7 +17,9 @@ def auth_module(tmp_path, monkeypatch):
     cfg = {
         "user_pool_id": "us-east-1_Test",
         "client_id": "test-client",
-        "client_secret": "test-secret",
+        "client_secret_arn": (
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-AbCdEf"
+        ),
         "cognito_domain": "auth.example.com",
         "redirect_uri": "https://site.example.com/_callback",
         "callback_path": "/_callback",

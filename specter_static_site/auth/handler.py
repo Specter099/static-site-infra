@@ -14,7 +14,7 @@ _config = json.loads((Path(__file__).parent / "config.json").read_text())
 
 USER_POOL_ID = _config["user_pool_id"]
 CLIENT_ID = _config["client_id"]
-CLIENT_SECRET = _config["client_secret"]
+CLIENT_SECRET_ARN = _config["client_secret_arn"]
 COGNITO_DOMAIN = _config["cognito_domain"]
 REDIRECT_URI = _config["redirect_uri"]
 CALLBACK_PATH = _config["callback_path"]
@@ -170,7 +170,7 @@ def _handle_callback(querystring: str, cookies: dict) -> dict:
 
     try:
         tokens = exchange_code(
-            code, REDIRECT_URI, COGNITO_DOMAIN, CLIENT_ID, CLIENT_SECRET
+            code, REDIRECT_URI, COGNITO_DOMAIN, CLIENT_ID, CLIENT_SECRET_ARN
         )
     except Exception as e:
         logger.error("Token exchange failed: %s", e)
@@ -216,7 +216,7 @@ def _try_refresh(refresh_token: str, uri: str, querystring: str) -> dict:
 
     try:
         tokens = refresh_tokens(
-            refresh_token, COGNITO_DOMAIN, CLIENT_ID, CLIENT_SECRET
+            refresh_token, COGNITO_DOMAIN, CLIENT_ID, CLIENT_SECRET_ARN
         )
     except Exception as e:
         logger.warning("Refresh failed: %s", e)

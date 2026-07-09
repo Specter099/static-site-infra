@@ -182,19 +182,107 @@ def test_synth_error_responses_do_not_mask_403(tmp_path):
     assert 404 in codes
 
 
+_TEST_SECRET_ARN = (
+    "arn:aws:secretsmanager:us-east-1:123456789012:secret:cognito-client-secret-AbCdEf"
+)
+
+
 @pytest.mark.skipif(
     not _HAS_DOCKER, reason="Lambda@Edge bundling requires a local Docker daemon"
 )
 def test_synth_with_cognito_auth(tmp_path):
-    _, assembly = _synth(
+    stack, assembly = _synth(
         tmp_path,
         certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
         cognito_user_pool_id="us-east-1_TestPool",
         cognito_client_id="testclientid",
-        cognito_client_secret="testclientsecret",
+        cognito_client_secret_arn=_TEST_SECRET_ARN,
         cognito_domain="myapp.auth.us-east-1.amazoncognito.com",
     )
     assert assembly is not None
+    # The edge function role must be able to read the client secret.
+    template = assertions.Template.from_stack(stack)
+    template.has_resource_properties(
+        "AWS::IAM::Policy",
+        assertions.Match.object_like(
+            {
+                "PolicyDocument": assertions.Match.object_like(
+                    {
+                        "Statement": assertions.Match.array_with(
+                            [
+                                assertions.Match.object_like(
+                                    {
+                                        "Action": assertions.Match.array_with(
+                                            ["secretsmanager:GetSecretValue"]
+                                        ),
+                                        "Resource": _TEST_SECRET_ARN,
+                                    }
+                                )
+                            ]
+                        )
+                    }
+                )
+            }
+        ),
+    )
+
+
+def test_invalid_cognito_secret_arn_raises(tmp_path):
+    app = cdk.App()
+    with pytest.raises(ValueError, match="Secrets Manager ARN"):
+        StaticSiteStack(
+            app,
+            "TestStack",
+            domain_name="example.com",
+            dist_path=make_dist(tmp_path),
+            certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+            cognito_user_pool_id="us-east-1_TestPool",
+            cognito_client_id="testclientid",
+            cognito_client_secret_arn="testclientsecret",  # raw secret, not an ARN
+            cognito_domain="myapp.auth.us-east-1.amazoncognito.com",
+        )
+
+
+def test_alarms_have_sns_actions_default_topic(tmp_path):
+    stack, _ = _synth(
+        tmp_path,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+    )
+    template = assertions.Template.from_stack(stack)
+    template.resource_count_is("AWS::SNS::Topic", 1)
+    alarms = template.find_resources("AWS::CloudWatch::Alarm")
+    assert len(alarms) == 2
+    for alarm in alarms.values():
+        props = alarm["Properties"]
+        assert props.get("AlarmActions"), "alarm must have an alarm action"
+        assert props.get("OKActions"), "alarm must have an OK action"
+
+
+def test_alarm_email_creates_subscription(tmp_path):
+    stack, _ = _synth(
+        tmp_path,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+        alarm_email="ops@example.com",
+    )
+    template = assertions.Template.from_stack(stack)
+    template.has_resource_properties(
+        "AWS::SNS::Subscription",
+        {"Protocol": "email", "Endpoint": "ops@example.com"},
+    )
+
+
+def test_alarm_topic_arn_imports_existing_topic(tmp_path):
+    topic_arn = "arn:aws:sns:us-east-1:123456789012:existing-alarms"
+    stack, _ = _synth(
+        tmp_path,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+        alarm_topic_arn=topic_arn,
+    )
+    template = assertions.Template.from_stack(stack)
+    # Imported, not created.
+    template.resource_count_is("AWS::SNS::Topic", 0)
+    for alarm in template.find_resources("AWS::CloudWatch::Alarm").values():
+        assert alarm["Properties"]["AlarmActions"] == [topic_arn]
 
 
 def test_synth_with_skip_deployment(tmp_path):
@@ -241,6 +329,6 @@ def test_malformed_cognito_user_pool_id_requires_explicit_region(tmp_path):
             certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
             cognito_user_pool_id="not-a-valid-pool-id",
             cognito_client_id="c",
-            cognito_client_secret="s",
+            cognito_client_secret_arn=_TEST_SECRET_ARN,
             cognito_domain="d.auth.us-east-1.amazoncognito.com",
         )

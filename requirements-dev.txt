@@ -1,3 +1,4 @@
 ruff
 pip-audit
 pytest>=8.0,<9.1
+boto3

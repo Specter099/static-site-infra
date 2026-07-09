@@ -14,18 +14,27 @@ from aws_cdk import (  # noqa: I001
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
     aws_cloudwatch as cloudwatch,
+    aws_cloudwatch_actions as cw_actions,
     aws_iam as iam,
     aws_lambda as _lambda,
     aws_logs as logs,
     aws_route53 as route53,
     aws_s3 as s3,
     aws_s3_deployment as s3deploy,
+    aws_secretsmanager as secretsmanager,
+    aws_sns as sns,
+    aws_sns_subscriptions as sns_subscriptions,
 )
 from cdk_nag import NagSuppressions
 from constructs import Construct
 
 _AUTH_DIR = Path(__file__).parent / "auth"
 _COGNITO_POOL_ID_RE = re.compile(r"^(?P<region>[a-z]{2}-[a-z]+-\d)_[A-Za-z0-9]+$")
+# Full Secrets Manager ARN (with the random suffix), in us-east-1 — the edge
+# handler fetches the secret from us-east-1 regardless of where it executes.
+_SECRET_ARN_RE = re.compile(
+    r"^arn:aws:secretsmanager:us-east-1:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$"
+)
 
 
 class StaticSiteStack(Stack):
@@ -43,9 +52,11 @@ class StaticSiteStack(Stack):
         deploy_role_arns: list[str] | None = None,
         cognito_user_pool_id: str | None = None,
         cognito_client_id: str | None = None,
-        cognito_client_secret: str | None = None,
+        cognito_client_secret_arn: str | None = None,
         cognito_domain: str | None = None,
         cognito_region: str | None = None,
+        alarm_topic_arn: str | None = None,
+        alarm_email: str | None = None,
         skip_deployment: bool = False,
         exclude_patterns: list[str] | None = None,
         deployment_memory_limit: int = 512,
@@ -62,14 +73,21 @@ class StaticSiteStack(Stack):
         cognito_params = [
             cognito_user_pool_id,
             cognito_client_id,
-            cognito_client_secret,
+            cognito_client_secret_arn,
             cognito_domain,
         ]
         enable_auth = all(p is not None for p in cognito_params)
         if any(p is not None for p in cognito_params) and not enable_auth:
             raise ValueError(
                 "All Cognito parameters (cognito_user_pool_id, cognito_client_id, "
-                "cognito_client_secret, cognito_domain) must be provided together."
+                "cognito_client_secret_arn, cognito_domain) must be provided together."
+            )
+        if enable_auth and not _SECRET_ARN_RE.match(cognito_client_secret_arn or ""):
+            raise ValueError(
+                "cognito_client_secret_arn must be a full Secrets Manager ARN "
+                "(including the random suffix) in us-east-1, e.g. "
+                "arn:aws:secretsmanager:us-east-1:123456789012:secret:name-AbCdEf. "
+                f"Got {cognito_client_secret_arn!r}."
             )
 
         # CloudWatch dashboard names allow only alphanumerics, dashes, and underscores.
@@ -167,62 +185,76 @@ class StaticSiteStack(Stack):
                     )
                 region = match.group("region")
 
-            # Stage auth source + config.json into a tempdir so the client secret
-            # is passed as a file (never interpolated into a shell command) and
-            # the asset hash covers the config.
+            # Stage auth source + config.json into a tempdir so the config is
+            # passed as a file (never interpolated into a shell command) and
+            # the asset hash covers it. Only the secret's ARN is baked into the
+            # package — the secret value itself is fetched from Secrets Manager
+            # at cold start. The tempdir is removed after asset staging so no
+            # config residue is left on the synth machine.
             staging = Path(tempfile.mkdtemp(prefix="static-site-auth-"))
-            for src in _AUTH_DIR.glob("*.py"):
-                shutil.copy2(src, staging / src.name)
-            (staging / "config.json").write_text(
-                json.dumps(
-                    {
-                        "user_pool_id": cognito_user_pool_id,
-                        "client_id": cognito_client_id,
-                        "client_secret": cognito_client_secret,
-                        "cognito_domain": cognito_domain,
-                        "redirect_uri": f"https://{domain_name}/_callback",
-                        "callback_path": "/_callback",
-                        "signout_path": "/_signout",
-                        "region": region,
-                    }
+            try:
+                for src in _AUTH_DIR.glob("*.py"):
+                    shutil.copy2(src, staging / src.name)
+                (staging / "config.json").write_text(
+                    json.dumps(
+                        {
+                            "user_pool_id": cognito_user_pool_id,
+                            "client_id": cognito_client_id,
+                            "client_secret_arn": cognito_client_secret_arn,
+                            "cognito_domain": cognito_domain,
+                            "redirect_uri": f"https://{domain_name}/_callback",
+                            "callback_path": "/_callback",
+                            "signout_path": "/_signout",
+                            "region": region,
+                        }
+                    )
                 )
-            )
 
-            auth_log_group = logs.LogGroup(
-                self,
-                "AuthEdgeFunctionLogs",
-                retention=logs.RetentionDays.TWO_WEEKS,
-                removal_policy=RemovalPolicy.DESTROY,
-            )
+                auth_log_group = logs.LogGroup(
+                    self,
+                    "AuthEdgeFunctionLogs",
+                    retention=logs.RetentionDays.TWO_WEEKS,
+                    removal_policy=RemovalPolicy.DESTROY,
+                )
 
-            auth_function = _lambda.Function(
-                self,
-                "AuthEdgeFunction",
-                runtime=_lambda.Runtime.PYTHON_3_12,
-                handler="handler.handler",
-                code=_lambda.Code.from_asset(
-                    str(staging),
-                    bundling=BundlingOptions(
-                        image=_lambda.Runtime.PYTHON_3_12.bundling_image,
-                        platform="linux/amd64",
-                        command=[
-                            "bash",
-                            "-c",
-                            "pip install PyJWT cryptography urllib3"
-                            " --platform manylinux2014_x86_64"
-                            " --implementation cp"
-                            " --python-version 3.12"
-                            " --only-binary=:all:"
-                            " -t /asset-output"
-                            " && cp /asset-input/*.py /asset-input/config.json"
-                            " /asset-output/",
-                        ],
+                auth_function = _lambda.Function(
+                    self,
+                    "AuthEdgeFunction",
+                    runtime=_lambda.Runtime.PYTHON_3_12,
+                    handler="handler.handler",
+                    code=_lambda.Code.from_asset(
+                        str(staging),
+                        bundling=BundlingOptions(
+                            image=_lambda.Runtime.PYTHON_3_12.bundling_image,
+                            platform="linux/amd64",
+                            command=[
+                                "bash",
+                                "-c",
+                                "pip install PyJWT cryptography urllib3"
+                                " --platform manylinux2014_x86_64"
+                                " --implementation cp"
+                                " --python-version 3.12"
+                                " --only-binary=:all:"
+                                " -t /asset-output"
+                                " && cp /asset-input/*.py /asset-input/config.json"
+                                " /asset-output/",
+                            ],
+                        ),
                     ),
-                ),
-                timeout=Duration.seconds(5),
-                memory_size=128,
-                log_group=auth_log_group,
+                    timeout=Duration.seconds(5),
+                    memory_size=128,
+                    log_group=auth_log_group,
+                )
+            finally:
+                # Asset staging is synchronous inside Function(); the tempdir
+                # (which contains config.json) is no longer needed.
+                shutil.rmtree(staging, ignore_errors=True)
+
+            # The edge function fetches the client secret at cold start.
+            client_secret = secretsmanager.Secret.from_secret_complete_arn(
+                self, "CognitoClientSecret", cognito_client_secret_arn
             )
+            client_secret.grant_read(auth_function)
 
             edge_lambdas.append(
                 cloudfront.EdgeLambda(
@@ -258,8 +290,29 @@ class StaticSiteStack(Stack):
             web_acl_id=web_acl_id,
         )
 
-        # CloudWatch alarms — console only, no SNS
-        cloudwatch.Alarm(
+        # Alarm notifications: import an existing topic, or create one. A
+        # default topic with no subscription is still useful — it can be
+        # subscribed to after deploy without a stack update.
+        if alarm_topic_arn:
+            alarm_topic = sns.Topic.from_topic_arn(self, "AlarmTopic", alarm_topic_arn)
+        else:
+            alarm_topic = sns.Topic(self, "AlarmTopic", enforce_ssl=True)
+            if alarm_email:
+                alarm_topic.add_subscription(
+                    sns_subscriptions.EmailSubscription(alarm_email)
+                )
+            NagSuppressions.add_resource_suppressions(
+                alarm_topic,
+                [
+                    {
+                        "id": "AwsSolutions-SNS2",
+                        "reason": "CloudWatch alarms cannot publish to topics encrypted with the AWS-managed aws/sns key, and a customer-managed KMS key adds standing cost disproportionate to alarm-notification metadata.",
+                    }
+                ],
+            )
+        alarm_action = cw_actions.SnsAction(alarm_topic)
+
+        high_5xx_alarm = cloudwatch.Alarm(
             self,
             "High5xxErrorRate",
             metric=cloudwatch.Metric(
@@ -275,8 +328,10 @@ class StaticSiteStack(Stack):
             alarm_description="CloudFront 5xx error rate exceeded 5%",
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
+        high_5xx_alarm.add_alarm_action(alarm_action)
+        high_5xx_alarm.add_ok_action(alarm_action)
 
-        cloudwatch.Alarm(
+        high_4xx_alarm = cloudwatch.Alarm(
             self,
             "High4xxErrorRate",
             metric=cloudwatch.Metric(
@@ -292,6 +347,8 @@ class StaticSiteStack(Stack):
             alarm_description="CloudFront 4xx error rate exceeded 10%",
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
+        high_4xx_alarm.add_alarm_action(alarm_action)
+        high_4xx_alarm.add_ok_action(alarm_action)
 
         cloudwatch.Dashboard(
             self,
@@ -416,4 +473,11 @@ class StaticSiteStack(Stack):
             "S3AccessLogsBucketName",
             value=s3_access_logs_bucket.bucket_name,
             description="S3 Access Logs Bucket Name",
+        )
+
+        CfnOutput(
+            self,
+            "AlarmTopicArn",
+            value=alarm_topic.topic_arn,
+            description="SNS topic receiving CloudWatch alarm notifications",
         )

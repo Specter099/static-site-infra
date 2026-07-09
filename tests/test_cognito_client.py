@@ -1,4 +1,4 @@
-"""Unit tests for cognito_client (no network)."""
+"""Unit tests for cognito_client (no network, no AWS)."""
 
 import base64
 import importlib
@@ -9,6 +9,8 @@ from unittest.mock import MagicMock
 import pytest
 
 AUTH_DIR = Path(__file__).resolve().parent.parent / "specter_static_site" / "auth"
+
+_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-AbCdEf"
 
 
 @pytest.fixture
@@ -22,6 +24,12 @@ def cc(tmp_path, monkeypatch):
     for name in ("handler", "jwt_validator", "cognito_client"):
         sys.modules.pop(name, None)
     mod = importlib.import_module("cognito_client")
+    # Stub Secrets Manager: no real AWS calls. Module cache resets each test
+    # because the module itself is re-imported fresh.
+    sm_client = MagicMock()
+    sm_client.get_secret_value.return_value = {"SecretString": "secret"}
+    monkeypatch.setattr(mod.boto3, "client", MagicMock(return_value=sm_client))
+    mod._sm_client_mock = sm_client
     yield mod
     for name in ("handler", "jwt_validator", "cognito_client"):
         sys.modules.pop(name, None)
@@ -51,28 +59,40 @@ def test_exchange_code_urlencodes_body(cc, monkeypatch):
         "https://site/_callback",
         "auth.example.com",
         "client-id",
-        "secret",
+        _SECRET_ARN,
     )
     assert tokens == {"id_token": "x"}
     body = http.request.call_args.kwargs["body"]
     # Special chars in the code MUST be URL-encoded, not raw.
     assert "the+code%2Bwith+symbols" in body or "the%20code%2Bwith%20symbols" in body
     assert "grant_type=authorization_code" in body
+    # The resolved secret (not the ARN) goes into the Basic auth header.
+    auth = http.request.call_args.kwargs["headers"]["Authorization"]
+    decoded = base64.b64decode(auth.removeprefix("Basic ")).decode()
+    assert decoded == "client-id:secret"
 
 
 def test_exchange_code_raises_on_non_200(cc, monkeypatch):
     monkeypatch.setattr(cc, "http", _fake_http(status=400, payload=b"bad"))
     with pytest.raises(RuntimeError, match="400"):
-        cc.exchange_code("c", "u", "d", "ci", "cs")
+        cc.exchange_code("c", "u", "d", "ci", _SECRET_ARN)
 
 
 def test_refresh_tokens_returns_empty_on_failure(cc, monkeypatch):
     monkeypatch.setattr(cc, "http", _fake_http(status=401, payload=b"no"))
-    assert cc.refresh_tokens("rt", "d", "ci", "cs") == {}
+    assert cc.refresh_tokens("rt", "d", "ci", _SECRET_ARN) == {}
 
 
 def test_refresh_tokens_success(cc, monkeypatch):
     monkeypatch.setattr(
         cc, "http", _fake_http(status=200, payload=b'{"id_token":"new"}')
     )
-    assert cc.refresh_tokens("rt", "d", "ci", "cs") == {"id_token": "new"}
+    assert cc.refresh_tokens("rt", "d", "ci", _SECRET_ARN) == {"id_token": "new"}
+
+
+def test_client_secret_fetched_once_and_cached(cc, monkeypatch):
+    monkeypatch.setattr(cc, "http", _fake_http())
+    cc.exchange_code("c", "u", "d", "ci", _SECRET_ARN)
+    cc.refresh_tokens("rt", "d", "ci", _SECRET_ARN)
+    assert cc._sm_client_mock.get_secret_value.call_count == 1
+    cc._sm_client_mock.get_secret_value.assert_called_with(SecretId=_SECRET_ARN)
