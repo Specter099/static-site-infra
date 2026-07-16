@@ -4,7 +4,7 @@
 aws-cdk-lib>=2.244,<2.255
 constructs~=10.6.0
 cdk-nag>=2.37.55,<2.39.0
-pytest~=9.0.2
+pytest>=9.0.2,<9.2.0
 ruff~=0.6
 pip-audit~=2.7
 boto3~=1.34
