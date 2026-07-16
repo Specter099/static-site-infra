@@ -2,7 +2,7 @@
 # Compile: .venv/bin/pip-compile requirements-lock.in -o requirements-lock.txt
 # Keep ranges in sync with pyproject.toml; Dependabot refreshes the output.
 aws-cdk-lib>=2.244,<2.255
-constructs~=10.6.0
+constructs>=10.6,<10.8
 cdk-nag>=2.37.55,<2.39.0
 pytest~=9.0.2
 ruff~=0.6
