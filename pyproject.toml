@@ -9,7 +9,7 @@ description = "Reusable CDK construct for static site hosting on AWS"
 requires-python = ">=3.11"
 dependencies = [
     "aws-cdk-lib>=2.244,<2.255",
-    "constructs~=10.6.0",
+    "constructs>=10.6,<10.8",
     "cdk-nag>=2.37.55,<2.39.0",
 ]
 
