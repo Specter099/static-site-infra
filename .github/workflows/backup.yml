@@ -5,12 +5,14 @@ on:
   workflow_dispatch:
 jobs:
   backup:
-    # Pinned to a commit SHA (mutable-ref supply-chain hardening). No secrets
-    # are passed: the reusable workflow reads AWS_ROLE_ARN from this repo's
-    # "backup" GitHub Environment.
-    uses: Specter099/.github/.github/workflows/repo-backup.yml@2633bc5b281230a26aefdd42ee9e6243b0a7ad1f # main 2026-07-09
+    # Pinned to a commit SHA (mutable-ref supply-chain hardening). The
+    # reusable workflow's `environment:` binding only scopes which
+    # environment's secrets apply once inside that job - it does not pull
+    # secrets from the caller, so AWS_ROLE_ARN must be passed explicitly.
+    uses: Specter099/.github/.github/workflows/repo-backup.yml@2633bc5b281230a26aefdd42ee9e6243b0a7ad1f  # main 2026-07-09
     with:
       s3-bucket: github-repo-backup-1b114b0d7fd4
+    secrets: inherit
     permissions:
       id-token: write
       contents: read
