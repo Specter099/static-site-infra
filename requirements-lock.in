@@ -8,7 +8,7 @@
 # block instead of emitting a pin. An unpinned setuptools is exactly how
 # PYSEC-2026-3447 kept reaching CI (see the setuptools note below).
 aws-cdk-lib>=2.244,<2.255
-constructs~=10.6.0
+constructs>=10.6,<10.9
 cdk-nag>=2.37.55,<2.39.0
 pytest~=9.0.2
 ruff~=0.6
