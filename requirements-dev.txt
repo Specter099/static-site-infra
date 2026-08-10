@@ -7,3 +7,14 @@ boto3
 PyJWT>=2.8.0
 cryptography>=41.0.0
 urllib3>=2.0.0
+
+# pip-audit inspects the INSTALLED environment, not just declared deps, and
+# setuptools arrives there from the runner image rather than from this file.
+# CI resolved 79.0.1, which carries PYSEC-2026-3447 (fixed in 83.0.0), and
+# `pip-audit --skip-editable` exits nonzero on it - so `Tests & Lint` has
+# been red on main since 2026-07-26 while every test passed.
+#
+# Pinning a floor here is what actually fixes the audit; raising the
+# build-system floor in pyproject.toml alone does not, because that governs
+# the isolated build env, not the env being audited.
+setuptools>=83.0.0
