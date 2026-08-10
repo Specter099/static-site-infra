@@ -1,6 +1,12 @@
 # CI lockfile input — pins the full test/lint environment for reproducible CI.
-# Compile: .venv/bin/pip-compile requirements-lock.in -o requirements-lock.txt
+# Compile: .venv/bin/pip-compile --allow-unsafe requirements-lock.in \
+#              -o requirements-lock.txt --strip-extras
 # Keep ranges in sync with pyproject.toml; Dependabot refreshes the output.
+#
+# --allow-unsafe is required: setuptools is pinned below, and pip-compile
+# otherwise drops it into the trailing "considered to be unsafe" comment
+# block instead of emitting a pin. An unpinned setuptools is exactly how
+# PYSEC-2026-3447 kept reaching CI (see the setuptools note below).
 aws-cdk-lib>=2.244,<2.255
 constructs~=10.6.0
 cdk-nag>=2.37.55,<2.39.0
@@ -10,5 +16,16 @@ pip-audit~=2.7
 boto3~=1.34
 # Test-time deps for exercising the Lambda@Edge handler code directly.
 PyJWT>=2.8.0
-cryptography>=41.0.0
+# >=50.0.0: 49.0.0 carries PYSEC-2026-3552, and `pip-audit --skip-editable`
+# exits nonzero on it. The floor was >=41.0.0, so the lock resolved 49.0.0.
+cryptography>=50.0.0
 urllib3>=2.0.0
+
+# setuptools is not a declared dependency of anything in this graph — it
+# arrives in CI from the runner image, and `pip-audit` audits the INSTALLED
+# environment. Unbounded, Python 3.11's runner supplied 79.0.1, which carries
+# PYSEC-2026-3447 (fixed in 83.0.0). Pinning it *here* is what bounds the
+# audited environment: `Tests & Lint` installs requirements-lock.txt, not
+# requirements-dev.txt, so the floor added to requirements-dev.txt in #93
+# never reached CI at all.
+setuptools>=83.0.0

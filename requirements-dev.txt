@@ -5,7 +5,7 @@ boto3
 # Test-time deps for exercising the Lambda@Edge handler code directly
 # (the Lambda bundle pins its own copies in specter_static_site/auth/).
 PyJWT>=2.8.0
-cryptography>=41.0.0
+cryptography>=50.0.0
 urllib3>=2.0.0
 
 # pip-audit inspects the INSTALLED environment, not just declared deps, and
