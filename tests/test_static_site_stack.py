@@ -345,6 +345,45 @@ def test_synth_no_unused_cloudfront_logs_bucket(tmp_path):
     assert len(buckets) == 2  # site + s3 access logs
 
 
+def test_buckets_in_account_regional_namespace_by_default(tmp_path):
+    # Regression (v3.0.0): v2.x created the buckets with
+    # BucketNamespace=account-regional. Dropping it forces a replacement that
+    # CloudFormation refuses for custom-named buckets, failing every upgrade.
+    stack, _ = _synth(
+        tmp_path,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+    )
+    template = assertions.Template.from_stack(stack)
+    buckets = template.find_resources("AWS::S3::Bucket")
+    assert len(buckets) == 2
+    for logical_id, bucket in buckets.items():
+        assert bucket["Properties"].get("BucketNamespace") == "account-regional", (
+            logical_id
+        )
+
+
+def test_bucket_namespace_none_omits_property(tmp_path):
+    stack, _ = _synth(
+        tmp_path,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+        bucket_namespace=None,
+    )
+    template = assertions.Template.from_stack(stack)
+    buckets = template.find_resources("AWS::S3::Bucket")
+    assert len(buckets) == 2
+    for bucket in buckets.values():
+        assert "BucketNamespace" not in bucket["Properties"]
+
+
+def test_invalid_bucket_namespace_raises(tmp_path):
+    with pytest.raises(ValueError, match="bucket_namespace"):
+        _synth(
+            tmp_path,
+            certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+            bucket_namespace="global",
+        )
+
+
 def test_synth_error_responses_do_not_mask_403(tmp_path):
     stack, _ = _synth(
         tmp_path,

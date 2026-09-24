@@ -73,6 +73,7 @@ app.synth()
 | `alarm_email` | `str` | No | Email subscription added to the created alarm topic |
 | `removal_policy` | `RemovalPolicy` | No | Site bucket policy; defaults to `RETAIN`. Pass `DESTROY` for dev/test stacks |
 | `bucket_name_prefix` | `str` | No | Overrides the domain slug in bucket names (S3 caps names at 63 chars) |
+| `bucket_namespace` | `str \| None` | No | S3 `BucketNamespace` for both buckets; defaults to `"account-regional"` (what v2.x deployed). Pass `None` **only** for stacks first deployed on v3.0.0 — see [v3.0.1](#v301-bucketnamespace-regression) |
 | `csp` | `str` | No | `Content-Security-Policy` value; builds a custom response headers policy |
 | `create_dns_records` | `bool` | No | Create Route 53 alias records (apex + `www`) pointing at the distribution; requires `hosted_zone_id` |
 | `cognito_user_pool_id` | `str` | No** | Cognito user pool for edge authentication |
@@ -123,7 +124,7 @@ subscribe later without a redeploy. Note the 4xx alarm mostly measures 403s:
 - **Retained buckets**: with the default `removal_policy`, deleting the stack
   orphans the site bucket; its fixed name must be freed manually before the
   same stack can be recreated.
-- **Upgrading to v3**: see below.
+- **Upgrading to v3**: see below. Upgrade to **v3.0.1 or later**, not v3.0.0.
 
 ## Breaking changes in v3
 
@@ -140,13 +141,31 @@ subscribe later without a redeploy. Note the 4xx alarm mostly measures 403s:
 5. **`deploy_role_arns` construct IDs changed** (full-ARN hash). The generated
    IAM policies are recreated on upgrade — a brief permission gap for those
    roles; avoid running deploys through them concurrently with the upgrade.
+6. **`CloudFrontLogsBucket` removed.** It was `RETAIN`, so upgraded stacks
+   leave `{slug}-cf-logs-{account}-{region}-an` orphaned in the account. It is
+   no longer written to; delete it by hand once you no longer need its logs.
+
+### v3.0.1: BucketNamespace regression
+
+v3.0.0 accidentally stopped setting `BucketNamespace: account-regional` on the
+buckets. That property can only change by replacement, and CloudFormation
+cannot replace custom-named buckets, so upgrading a v2.x stack to v3.0.0 fails
+with `UPDATE_FAILED ... S3AccessLogsBucket ... requires replacing` and rolls
+back. v3.0.1 sets it again via the `bucket_namespace` parameter (default
+`"account-regional"`):
+
+- **Upgrading from v2.x** (or retrying a failed v3.0.0 upgrade): go straight
+  to v3.0.1 with no extra parameters.
+- **Stack first created on v3.0.0** (its buckets have no namespace — check
+  with `aws cloudformation get-template` or `cdk diff`): pass
+  `bucket_namespace=None` to keep it deployable.
 
 ## Versioning
 
 ```bash
 # Release a new version
-git tag v3.0.0 && git push origin v3.0.0
+git tag v3.0.1 && git push origin v3.0.1
 
 # Update a site to use the new version
-# In infra/requirements.txt: change @v2.x.y → @v3.0.0
+# In infra/requirements.txt: change @v2.x.y → @v3.0.1
 ```

@@ -74,6 +74,10 @@ cookies are `__Host-`-prefixed; `deploy_role_arns` construct IDs hash the full
 ARN; synth validates us-east-1 and bucket-name length. See README "Breaking
 changes in v3".
 
+Never drop or change `BucketNamespace` on existing buckets: it forces a
+replacement, which CloudFormation refuses for custom-named buckets (the v3.0.0
+regression fixed in v3.0.1).
+
 ## Key Constructor Parameters
 
 | Parameter | Purpose |
@@ -89,6 +93,7 @@ changes in v3".
 | `deploy_role_arns` | IAM role ARNs granted read/write on the site bucket |
 | `removal_policy` | Site bucket removal policy; defaults to RETAIN (pass DESTROY for dev/test) |
 | `bucket_name_prefix` | Overrides the domain slug in bucket names (S3's 63-char limit) |
+| `bucket_namespace` | S3 `BucketNamespace` on both buckets; defaults to `"account-regional"` (v2.x-compatible). `None` only for stacks first deployed on v3.0.0 |
 | `csp` | Content-Security-Policy value (builds a custom response headers policy) |
 | `create_dns_records` | Create Route 53 alias records for apex + www (requires `hosted_zone_id`) |
 

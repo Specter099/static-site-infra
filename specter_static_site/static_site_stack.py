@@ -39,6 +39,7 @@ _COGNITO_POOL_ID_RE = re.compile(r"^(?P<region>[a-z]{2}-[a-z]+-\d)_[A-Za-z0-9]+$
 _SECRET_ARN_RE = re.compile(
     r"^arn:aws:secretsmanager:us-east-1:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$"
 )
+_BUCKET_NAMESPACES = ("account-regional", None)
 
 
 class StaticSiteStack(Stack):
@@ -63,6 +64,7 @@ class StaticSiteStack(Stack):
         alarm_email: str | None = None,
         removal_policy: RemovalPolicy = RemovalPolicy.RETAIN,
         bucket_name_prefix: str | None = None,
+        bucket_namespace: str | None = "account-regional",
         csp: str | None = None,
         create_dns_records: bool = False,
         skip_deployment: bool = False,
@@ -125,6 +127,12 @@ class StaticSiteStack(Stack):
                     "env=cdk.Environment(region='us-east-1', ...)."
                 )
 
+        if bucket_namespace not in _BUCKET_NAMESPACES:
+            raise ValueError(
+                "bucket_namespace must be 'account-regional' (default) or None, "
+                f"got {bucket_namespace!r}."
+            )
+
         # CloudWatch dashboard names allow only alphanumerics, dashes, and underscores.
         resolved_dashboard_name = (dashboard_name or domain_name).replace(".", "-")
 
@@ -183,6 +191,17 @@ class StaticSiteStack(Stack):
                 )
             ],
         )
+
+        # Buckets live in the account-regional namespace (the "-an" suffix).
+        # BucketNamespace is a replacement-triggering property and the buckets
+        # have fixed names, so changing it on an existing stack fails the
+        # deploy. v2.x stacks were created with "account-regional"; pass None
+        # only for stacks first deployed on v3.0.0, which omitted it.
+        if bucket_namespace:
+            for bucket in (s3_access_logs_bucket, site_bucket):
+                bucket.node.default_child.add_property_override(
+                    "BucketNamespace", bucket_namespace
+                )
 
         # Grant external roles read/write access to the site bucket (e.g. CI/CD pipelines).
         # Construct IDs hash the full ARN — role names alone can collide across
