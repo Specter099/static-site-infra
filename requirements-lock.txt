@@ -45,7 +45,7 @@ constructs==10.6.0
     #   -r requirements-lock.in
     #   aws-cdk-lib
     #   cdk-nag
-cryptography==50.0.0
+cryptography==50.0.1
     # via -r requirements-lock.in
 cyclonedx-python-lib==11.11.0
     # via pip-audit
