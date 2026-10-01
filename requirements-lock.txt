@@ -153,7 +153,7 @@ typing-extensions==4.16.0
     #   cattrs
     #   cyclonedx-python-lib
     #   jsii
-urllib3==2.7.0
+urllib3==2.8.0
     # via
     #   -r requirements-lock.in
     #   botocore
