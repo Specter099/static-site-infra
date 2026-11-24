@@ -20,7 +20,7 @@ Reusable AWS CDK construct for hosting static websites on S3 + CloudFront.
 In your `infra/requirements.txt`:
 
 ```
-git+https://github.com/Specter099/static-site-infra.git@v3.0.0
+git+https://github.com/Specter099/static-site-infra.git@v3.1.0
 ```
 
 ### Example `app.py`
@@ -68,12 +68,13 @@ app.synth()
 | `hosted_zone_id` | `str` | No* | Route 53 hosted zone ID for cert DNS validation |
 | `certificate_arn` | `str` | No* | ARN of existing ACM certificate to import (must be in us-east-1 and cover `www.{domain}` too) |
 | `web_acl_id` | `str` | No | WAFv2 Web ACL ARN to attach to CloudFront |
-| `dashboard_name` | `str` | No | CloudWatch dashboard name (defaults to `domain_name`) |
+| `dashboard_name` | `str` | No | CloudWatch dashboard name (defaults to `domain_name`); ignored when `enable_monitoring=False` |
 | `alarm_topic_arn` | `str` | No | Existing SNS topic for alarm notifications (otherwise one is created) |
 | `alarm_email` | `str` | No | Email subscription added to the created alarm topic |
+| `enable_monitoring` | `bool` | No | Create the CloudWatch dashboard, the 4xx/5xx alarms and the alarm SNS topic; defaults to `True`. Pass `False` to omit them (and the `AlarmTopicArn` output); combining `False` with `alarm_topic_arn`/`alarm_email` raises `ValueError` |
 | `removal_policy` | `RemovalPolicy` | No | Site bucket policy; defaults to `RETAIN`. Pass `DESTROY` for dev/test stacks |
 | `bucket_name_prefix` | `str` | No | Overrides the domain slug in bucket names (S3 caps names at 63 chars) |
-| `bucket_namespace` | `str \| None` | No | S3 `BucketNamespace` for both buckets; defaults to `"account-regional"` (what v2.x deployed). Pass `None` **only** for stacks first deployed on v3.0.0 — see [v3.0.1](#v301-bucketnamespace-regression) |
+| `bucket_namespace` | `str \| None` | No | S3 `BucketNamespace` for both buckets; defaults to `"account-regional"` (what v2.x deployed). Pass `None` **only** for stacks first deployed on v3.0.0 — see [the BucketNamespace fix](#v301-fix-shipped-in-v310-bucketnamespace-regression) |
 | `csp` | `str` | No | `Content-Security-Policy` value; builds a custom response headers policy |
 | `create_dns_records` | `bool` | No | Create Route 53 alias records (apex + `www`) pointing at the distribution; requires `hosted_zone_id` |
 | `cognito_user_pool_id` | `str` | No** | Cognito user pool for edge authentication |
@@ -108,6 +109,10 @@ neither — a bare topic is still created (its ARN is a stack output) so you can
 subscribe later without a redeploy. Note the 4xx alarm mostly measures 403s:
 404s are rewritten to `200 /index.html` for SPA routing.
 
+Pass `enable_monitoring=False` to skip the alarms, the dashboard and the SNS
+topic entirely (e.g. to avoid their standing CloudWatch cost). Deploying that
+change to an existing stack deletes those resources.
+
 ## Operational caveats
 
 - **us-east-1 required** when auth is enabled or a certificate is created;
@@ -124,7 +129,7 @@ subscribe later without a redeploy. Note the 4xx alarm mostly measures 403s:
 - **Retained buckets**: with the default `removal_policy`, deleting the stack
   orphans the site bucket; its fixed name must be freed manually before the
   same stack can be recreated.
-- **Upgrading to v3**: see below. Upgrade to **v3.0.1 or later**, not v3.0.0.
+- **Upgrading to v3**: see below. Upgrade to **v3.1.0 or later**, not v3.0.0 (v3.0.1 was never tagged; its fix ships in v3.1.0).
 
 ## Breaking changes in v3
 
@@ -145,7 +150,7 @@ subscribe later without a redeploy. Note the 4xx alarm mostly measures 403s:
    leave `{slug}-cf-logs-{account}-{region}-an` orphaned in the account. It is
    no longer written to; delete it by hand once you no longer need its logs.
 
-### v3.0.1: BucketNamespace regression
+### v3.0.1 fix (shipped in v3.1.0): BucketNamespace regression
 
 v3.0.0 accidentally stopped setting `BucketNamespace: account-regional` on the
 buckets. That property can only change by replacement, and CloudFormation
@@ -155,7 +160,7 @@ back. v3.0.1 sets it again via the `bucket_namespace` parameter (default
 `"account-regional"`):
 
 - **Upgrading from v2.x** (or retrying a failed v3.0.0 upgrade): go straight
-  to v3.0.1 with no extra parameters.
+  to v3.1.0 with no extra parameters.
 - **Stack first created on v3.0.0** (its buckets have no namespace — check
   with `aws cloudformation get-template` or `cdk diff`): pass
   `bucket_namespace=None` to keep it deployable.
@@ -164,8 +169,8 @@ back. v3.0.1 sets it again via the `bucket_namespace` parameter (default
 
 ```bash
 # Release a new version
-git tag v3.0.1 && git push origin v3.0.1
+git tag -a v3.1.0 -m "v3.1.0" && git push origin v3.1.0
 
 # Update a site to use the new version
-# In infra/requirements.txt: change @v2.x.y → @v3.0.1
+# In infra/requirements.txt: change @v2.x.y → @v3.1.0
 ```

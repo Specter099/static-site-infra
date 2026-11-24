@@ -334,6 +334,48 @@ def test_synth_alarms_present(tmp_path):
     )
 
 
+def test_synth_monitoring_enabled_by_default(tmp_path):
+    stack, _ = _synth(
+        tmp_path,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+    )
+    template = assertions.Template.from_stack(stack)
+    template.resource_count_is("AWS::CloudWatch::Alarm", 2)
+    template.resource_count_is("AWS::CloudWatch::Dashboard", 1)
+    template.resource_count_is("AWS::SNS::Topic", 1)
+    assert "AlarmTopicArn" in template.to_json()["Outputs"]
+
+
+def test_synth_monitoring_disabled(tmp_path):
+    stack, _ = _synth(
+        tmp_path,
+        certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+        enable_monitoring=False,
+    )
+    template = assertions.Template.from_stack(stack)
+    template.resource_count_is("AWS::CloudWatch::Alarm", 0)
+    template.resource_count_is("AWS::CloudWatch::Dashboard", 0)
+    template.resource_count_is("AWS::SNS::Topic", 0)
+    assert "AlarmTopicArn" not in template.to_json().get("Outputs", {})
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"alarm_email": "ops@example.com"},
+        {"alarm_topic_arn": "arn:aws:sns:us-east-1:123456789012:existing-alarms"},
+    ],
+)
+def test_monitoring_disabled_rejects_alarm_params(tmp_path, extra):
+    with pytest.raises(ValueError, match="enable_monitoring=False"):
+        _synth(
+            tmp_path,
+            certificate_arn="arn:aws:acm:us-east-1:123456789012:certificate/test-cert",
+            enable_monitoring=False,
+            **extra,
+        )
+
+
 def test_synth_no_unused_cloudfront_logs_bucket(tmp_path):
     stack, _ = _synth(
         tmp_path,

@@ -1,9 +1,34 @@
 # Changelog
 
-## v3.0.1 — unreleased
+## v3.1.0 — unreleased
 
-Patch release that fixes a breaking regression in v3.0.0. **Upgrade from v2.x
-straight to v3.0.1; do not use v3.0.0.**
+Adds an opt-out for the monitoring resources and ships the v3.0.1 fix below
+(v3.0.1 was never tagged; **use v3.1.0 or later, never v3.0.0**). Backwards
+compatible: the new parameter defaults to the existing behaviour.
+
+### Added
+
+- `enable_monitoring: bool = True` on `StaticSiteStack`. Pass `False` to skip
+  the CloudWatch dashboard, the 4xx/5xx alarms, the alarm SNS topic (and its
+  topic policy) and the `AlarmTopicArn` output, e.g. to avoid their standing
+  CloudWatch cost. Combining `enable_monitoring=False` with `alarm_topic_arn`
+  or `alarm_email` raises `ValueError`; `dashboard_name` is ignored.
+
+### Upgrade notes (v3.0.x → v3.1.0)
+
+- **Default behaviour is unchanged** (`enable_monitoring=True`): no resource
+  is added, removed or replaced for existing stacks.
+- **Passing `enable_monitoring=False` to an existing stack deletes** the
+  dashboard, both alarms and the alarm topic (if the library created it) on
+  the next deploy. If you already deleted them by hand, CloudFormation is
+  asked to delete resources that no longer exist; run `cdk diff` first and
+  watch the first deploy.
+- Everything under "v3.0.1" below is included in this release.
+
+## v3.0.1 — folded into v3.1.0 (never tagged)
+
+Patch fix for a breaking regression in v3.0.0, released as part of v3.1.0.
+**Upgrade from v2.x straight to v3.1.0; do not use v3.0.0.**
 
 ### Fixed
 
@@ -45,4 +70,4 @@ straight to v3.0.1; do not use v3.0.0.**
 ## v3.0.0
 
 See README "Breaking changes in v3". Known regression: fails to upgrade v2.x
-stacks (fixed in v3.0.1).
+stacks (fixed in v3.1.0).

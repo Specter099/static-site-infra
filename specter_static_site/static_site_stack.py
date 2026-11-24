@@ -43,6 +43,14 @@ _BUCKET_NAMESPACES = ("account-regional", None)
 
 
 class StaticSiteStack(Stack):
+    """S3 + CloudFront static site.
+
+    ``enable_monitoring`` (default ``True``) controls the CloudWatch dashboard,
+    the 4xx/5xx alarms and the alarm SNS topic. Set it to ``False`` to omit
+    them; ``alarm_topic_arn``/``alarm_email`` are then rejected as meaningless
+    and ``dashboard_name`` is ignored.
+    """
+
     def __init__(  # noqa: PLR0913
         self,
         scope: Construct,
@@ -62,6 +70,7 @@ class StaticSiteStack(Stack):
         cognito_region: str | None = None,
         alarm_topic_arn: str | None = None,
         alarm_email: str | None = None,
+        enable_monitoring: bool = True,
         removal_policy: RemovalPolicy = RemovalPolicy.RETAIN,
         bucket_name_prefix: str | None = None,
         bucket_namespace: str | None = "account-regional",
@@ -78,6 +87,12 @@ class StaticSiteStack(Stack):
             description=f"Static site hosting for {domain_name}",
             **kwargs,
         )
+
+        if not enable_monitoring and (alarm_topic_arn or alarm_email):
+            raise ValueError(
+                "alarm_topic_arn/alarm_email have no effect when "
+                "enable_monitoring=False; remove them."
+            )
 
         if create_dns_records and not hosted_zone_id:
             raise ValueError(
@@ -428,121 +443,122 @@ class StaticSiteStack(Stack):
                 target=cf_target,
             )
 
-        # Alarm notifications: import an existing topic, or create one. A
-        # default topic with no subscription is still useful — it can be
-        # subscribed to after deploy without a stack update.
-        if alarm_topic_arn:
-            alarm_topic = sns.Topic.from_topic_arn(self, "AlarmTopic", alarm_topic_arn)
-        else:
-            alarm_topic = sns.Topic(self, "AlarmTopic", enforce_ssl=True)
-            if alarm_email:
-                alarm_topic.add_subscription(
-                    sns_subscriptions.EmailSubscription(alarm_email)
+        if enable_monitoring:
+            # Alarm notifications: import an existing topic, or create one. A
+            # default topic with no subscription is still useful — it can be
+            # subscribed to after deploy without a stack update.
+            if alarm_topic_arn:
+                alarm_topic = sns.Topic.from_topic_arn(self, "AlarmTopic", alarm_topic_arn)
+            else:
+                alarm_topic = sns.Topic(self, "AlarmTopic", enforce_ssl=True)
+                if alarm_email:
+                    alarm_topic.add_subscription(
+                        sns_subscriptions.EmailSubscription(alarm_email)
+                    )
+                NagSuppressions.add_resource_suppressions(
+                    alarm_topic,
+                    [
+                        {
+                            "id": "AwsSolutions-SNS2",
+                            "reason": "CloudWatch alarms cannot publish to topics encrypted with the AWS-managed aws/sns key, and a customer-managed KMS key adds standing cost disproportionate to alarm-notification metadata.",
+                        }
+                    ],
                 )
-            NagSuppressions.add_resource_suppressions(
-                alarm_topic,
-                [
-                    {
-                        "id": "AwsSolutions-SNS2",
-                        "reason": "CloudWatch alarms cannot publish to topics encrypted with the AWS-managed aws/sns key, and a customer-managed KMS key adds standing cost disproportionate to alarm-notification metadata.",
-                    }
+            alarm_action = cw_actions.SnsAction(alarm_topic)
+
+            high_5xx_alarm = cloudwatch.Alarm(
+                self,
+                "High5xxErrorRate",
+                metric=cloudwatch.Metric(
+                    namespace="AWS/CloudFront",
+                    metric_name="5xxErrorRate",
+                    dimensions_map={"DistributionId": distribution.distribution_id},
+                    statistic="Average",
+                    period=Duration.minutes(5),
+                ),
+                threshold=5,
+                evaluation_periods=2,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                alarm_description="CloudFront 5xx error rate exceeded 5%",
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            )
+            high_5xx_alarm.add_alarm_action(alarm_action)
+            high_5xx_alarm.add_ok_action(alarm_action)
+
+            high_4xx_alarm = cloudwatch.Alarm(
+                self,
+                "High4xxErrorRate",
+                metric=cloudwatch.Metric(
+                    namespace="AWS/CloudFront",
+                    metric_name="4xxErrorRate",
+                    dimensions_map={"DistributionId": distribution.distribution_id},
+                    statistic="Average",
+                    period=Duration.minutes(5),
+                ),
+                threshold=10,
+                evaluation_periods=2,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                alarm_description=(
+                    "CloudFront 4xx error rate exceeded 10%. Note: 404s are "
+                    "rewritten to 200 /index.html for SPA routing, so this metric "
+                    "mostly reflects 403s (auth/OAC failures), not broken links."
+                ),
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            )
+            high_4xx_alarm.add_alarm_action(alarm_action)
+            high_4xx_alarm.add_ok_action(alarm_action)
+
+            cloudwatch.Dashboard(
+                self,
+                "SiteDashboard",
+                dashboard_name=resolved_dashboard_name,
+                widgets=[
+                    [
+                        cloudwatch.GraphWidget(
+                            title="CloudFront Error Rates",
+                            width=12,
+                            left=[
+                                cloudwatch.Metric(
+                                    namespace="AWS/CloudFront",
+                                    metric_name="5xxErrorRate",
+                                    dimensions_map={
+                                        "DistributionId": distribution.distribution_id
+                                    },
+                                    statistic="Average",
+                                    period=Duration.minutes(5),
+                                    label="5xx Error Rate",
+                                ),
+                                cloudwatch.Metric(
+                                    namespace="AWS/CloudFront",
+                                    metric_name="4xxErrorRate",
+                                    dimensions_map={
+                                        "DistributionId": distribution.distribution_id
+                                    },
+                                    statistic="Average",
+                                    period=Duration.minutes(5),
+                                    label="4xx Error Rate",
+                                ),
+                            ],
+                        ),
+                        cloudwatch.GraphWidget(
+                            title="CloudFront Requests",
+                            width=12,
+                            left=[
+                                cloudwatch.Metric(
+                                    namespace="AWS/CloudFront",
+                                    metric_name="Requests",
+                                    dimensions_map={
+                                        "DistributionId": distribution.distribution_id
+                                    },
+                                    statistic="Sum",
+                                    period=Duration.minutes(5),
+                                    label="Total Requests",
+                                ),
+                            ],
+                        ),
+                    ],
                 ],
             )
-        alarm_action = cw_actions.SnsAction(alarm_topic)
-
-        high_5xx_alarm = cloudwatch.Alarm(
-            self,
-            "High5xxErrorRate",
-            metric=cloudwatch.Metric(
-                namespace="AWS/CloudFront",
-                metric_name="5xxErrorRate",
-                dimensions_map={"DistributionId": distribution.distribution_id},
-                statistic="Average",
-                period=Duration.minutes(5),
-            ),
-            threshold=5,
-            evaluation_periods=2,
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            alarm_description="CloudFront 5xx error rate exceeded 5%",
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-        )
-        high_5xx_alarm.add_alarm_action(alarm_action)
-        high_5xx_alarm.add_ok_action(alarm_action)
-
-        high_4xx_alarm = cloudwatch.Alarm(
-            self,
-            "High4xxErrorRate",
-            metric=cloudwatch.Metric(
-                namespace="AWS/CloudFront",
-                metric_name="4xxErrorRate",
-                dimensions_map={"DistributionId": distribution.distribution_id},
-                statistic="Average",
-                period=Duration.minutes(5),
-            ),
-            threshold=10,
-            evaluation_periods=2,
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            alarm_description=(
-                "CloudFront 4xx error rate exceeded 10%. Note: 404s are "
-                "rewritten to 200 /index.html for SPA routing, so this metric "
-                "mostly reflects 403s (auth/OAC failures), not broken links."
-            ),
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-        )
-        high_4xx_alarm.add_alarm_action(alarm_action)
-        high_4xx_alarm.add_ok_action(alarm_action)
-
-        cloudwatch.Dashboard(
-            self,
-            "SiteDashboard",
-            dashboard_name=resolved_dashboard_name,
-            widgets=[
-                [
-                    cloudwatch.GraphWidget(
-                        title="CloudFront Error Rates",
-                        width=12,
-                        left=[
-                            cloudwatch.Metric(
-                                namespace="AWS/CloudFront",
-                                metric_name="5xxErrorRate",
-                                dimensions_map={
-                                    "DistributionId": distribution.distribution_id
-                                },
-                                statistic="Average",
-                                period=Duration.minutes(5),
-                                label="5xx Error Rate",
-                            ),
-                            cloudwatch.Metric(
-                                namespace="AWS/CloudFront",
-                                metric_name="4xxErrorRate",
-                                dimensions_map={
-                                    "DistributionId": distribution.distribution_id
-                                },
-                                statistic="Average",
-                                period=Duration.minutes(5),
-                                label="4xx Error Rate",
-                            ),
-                        ],
-                    ),
-                    cloudwatch.GraphWidget(
-                        title="CloudFront Requests",
-                        width=12,
-                        left=[
-                            cloudwatch.Metric(
-                                namespace="AWS/CloudFront",
-                                metric_name="Requests",
-                                dimensions_map={
-                                    "DistributionId": distribution.distribution_id
-                                },
-                                statistic="Sum",
-                                period=Duration.minutes(5),
-                                label="Total Requests",
-                            ),
-                        ],
-                    ),
-                ],
-            ],
-        )
 
         # Deploy site assets from dist/ (skip when CI/CD handles deployment separately).
         if not skip_deployment:
@@ -617,9 +633,10 @@ class StaticSiteStack(Stack):
             description="S3 Access Logs Bucket Name",
         )
 
-        CfnOutput(
-            self,
-            "AlarmTopicArn",
-            value=alarm_topic.topic_arn,
-            description="SNS topic receiving CloudWatch alarm notifications",
-        )
+        if enable_monitoring:
+            CfnOutput(
+                self,
+                "AlarmTopicArn",
+                value=alarm_topic.topic_arn,
+                description="SNS topic receiving CloudWatch alarm notifications",
+            )
